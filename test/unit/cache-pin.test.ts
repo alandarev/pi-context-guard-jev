@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { countBreakpoints, pinQuestionBreakpoint } from "../../src/cache-pin.ts";
+import { countBreakpoints, markedToolResults, normalizeToolUseId, pinQuestionBreakpoint, placeGuardBreakpoints } from "../../src/cache-pin.ts";
 
 type Json = Record<string, any>;
 const cc = { type: "ephemeral" };
@@ -191,4 +191,116 @@ test("TTL ordering: a 1h rolling breakpoint after a 5m prefix is a conflict", ()
 	const payload = ttlPayload(undefined, undefined, cc1h);
 	assert.equal(pinQuestionBreakpoint(payload), "pinned");
 	assert.deepEqual(payload.messages[0].content[0].cache_control, cc1h);
+});
+
+// --- read and write anchors (placeGuardBreakpoints) ---------------------------------------------
+
+/** A long run: question, then turns t1…tN each with one tool call; rolling breakpoint on the last result. */
+function longRun(turns: number, rolling: Json = cc): Json[] {
+	const messages: Json[] = [
+		{ role: "user", content: [text("first question")] },
+		{ role: "assistant", content: [text("first answer")] },
+		{ role: "user", content: [text("run question")] },
+	];
+	for (let i = 1; i <= turns; i++) messages.push(toolUse(`t${i}`), toolResult(`t${i}`, i === turns ? rolling : undefined));
+	return messages;
+}
+const resultBlock = (payload: Json, id: string): Json =>
+	payload.messages.flatMap((m: Json) => (Array.isArray(m.content) ? m.content : [])).find((b: Json) => b.tool_use_id === id);
+
+test("anchors: the question is pinned first; a read anchor takes the next slot (API key)", () => {
+	const payload: Json = { ...apiKeyPayload(), messages: longRun(8) };
+	const result = placeGuardBreakpoints(payload, { anchors: ["t4"], pinQuestion: true });
+	assert.deepEqual(result, { anchored: ["t4"], skipped: [], question: "pinned", removed: ["tools"] });
+	assert.deepEqual(payload.messages[2].content[0].cache_control, cc);
+	assert.deepEqual(resultBlock(payload, "t4").cache_control, cc);
+	assert.equal(countBreakpoints(payload), 4);
+	assert.deepEqual(markedToolResults(payload), ["t4", "t8"]);
+});
+
+test("anchors: question > read > write when the budget is tight (OAuth)", () => {
+	const payload: Json = { ...oauthPayload(), messages: longRun(10) };
+	const result = placeGuardBreakpoints(payload, { anchors: ["t3"], writeAnchors: ["t6"], pinQuestion: true });
+	assert.equal(result.question, "pinned");
+	assert.deepEqual(result.anchored, ["t3"]);
+	assert.deepEqual(result.skipped, [{ id: "t6", reason: "over-budget" }]);
+	assert.deepEqual(result.removed, ["system[0]", "tools"]);
+	assert.equal(countBreakpoints(payload), 4);
+	// Without a read anchor, the write anchor fits.
+	const write: Json = { ...oauthPayload(), messages: longRun(10) };
+	assert.deepEqual(placeGuardBreakpoints(write, { anchors: [], writeAnchors: ["t6"], pinQuestion: true }).anchored, ["t6"]);
+	assert.equal(countBreakpoints(write), 4);
+});
+
+test("anchors: the question survives when another breakpoint leaves no room for anchors", () => {
+	// No system breakpoint: the tools breakpoint cannot be dropped; an extra one sits on message 1.
+	const payload: Json = { tools: [{ name: "a", cache_control: { ...cc } }], system: [text("s")], messages: longRun(10) };
+	payload.messages[1].content[0].cache_control = { ...cc };
+	const result = placeGuardBreakpoints(payload, { anchors: ["t3"], writeAnchors: ["t6"], pinQuestion: true });
+	assert.equal(result.question, "pinned");
+	assert.deepEqual(result.anchored, []);
+	assert.deepEqual(result.skipped, [
+		{ id: "t6", reason: "over-budget" },
+		{ id: "t3", reason: "over-budget" },
+	]);
+	assert.deepEqual(markedToolResults(payload), ["t10"]);
+	assert.equal(countBreakpoints(payload), 4);
+});
+
+test("anchors: not found, in the last message, already marked, normalized ids", () => {
+	const payload = { ...apiKeyPayload(), messages: longRun(3) };
+	resultBlock(payload, "t1").cache_control = { ...cc };
+	const result = placeGuardBreakpoints(payload, { anchors: ["zz", "t3", "t1"], pinQuestion: false });
+	assert.deepEqual(result.skipped, [
+		{ id: "zz", reason: "not-found" },
+		{ id: "t3", reason: "in-last-message" },
+		{ id: "t1", reason: "already" },
+	]);
+	// Pi's Anthropic provider rewrites ids such as OpenAI's "call_1|fc_2".
+	const normalized = { ...apiKeyPayload(), messages: longRun(4) };
+	resultBlock(normalized, "t2").tool_use_id = normalizeToolUseId("call_1|fc_2");
+	assert.deepEqual(placeGuardBreakpoints(normalized, { anchors: ["call_1|fc_2"], pinQuestion: false }).anchored, ["call_1|fc_2"]);
+	assert.equal(normalizeToolUseId("call_1|fc_2"), "call_1_fc_2");
+});
+
+test("anchors: TTLs follow the rolling breakpoint and never break the order", () => {
+	const payload: Json = { ...apiKeyPayload(), messages: longRun(6, cc1h) };
+	payload.system[0].cache_control = { ...cc1h };
+	payload.tools[1].cache_control = { ...cc1h };
+	const result = placeGuardBreakpoints(payload, { anchors: [], writeAnchors: ["t2"], pinQuestion: true });
+	assert.deepEqual(result.anchored, ["t2"]);
+	assert.deepEqual(resultBlock(payload, "t2").cache_control, cc1h);
+	assert.deepEqual(payload.messages[2].content[0].cache_control, cc1h);
+	// A 5m system prompt before a 1h rolling breakpoint: nothing fits in between.
+	const conflict = { ...apiKeyPayload(), messages: longRun(6, cc1h) };
+	const skipped = placeGuardBreakpoints(conflict, { anchors: [], writeAnchors: ["t2"], pinQuestion: true });
+	assert.deepEqual(skipped.skipped, [{ id: "t2", reason: "ttl-conflict" }]);
+	assert.equal(skipped.question, "ttl-conflict");
+	assert.equal(resultBlock(conflict, "t2").cache_control, undefined);
+});
+
+test("anchors: payloads without caching or messages are left alone", () => {
+	const payload: Json = { messages: longRun(4, undefined as unknown as Json) };
+	payload.messages[payload.messages.length - 1] = toolResult("t4");
+	const before = structuredClone(payload);
+	assert.equal(placeGuardBreakpoints(payload, { anchors: ["t2"], pinQuestion: true }).question, "no-cache");
+	assert.deepEqual(payload, before);
+	assert.equal(placeGuardBreakpoints(undefined, { anchors: [], pinQuestion: true }).question, "not-anthropic");
+	assert.deepEqual(markedToolResults(undefined), []);
+});
+
+test("anchors: a read point inside a batch of consecutive tool_result blocks", () => {
+	const payload: Json = { ...apiKeyPayload(), messages: longRun(4) };
+	// One Anthropic user message holding the results of two parallel calls.
+	payload.messages.splice(3, 2, { role: "assistant", content: [{ type: "tool_use", id: "p1" }, { type: "tool_use", id: "p2" }] }, {
+		role: "user",
+		content: [
+			{ type: "tool_result", tool_use_id: "p1", content: "a" },
+			{ type: "tool_result", tool_use_id: "p2", content: "b" },
+		],
+	});
+	const result = placeGuardBreakpoints(payload, { anchors: ["p2"], pinQuestion: true });
+	assert.deepEqual(result.anchored, ["p2"]);
+	assert.deepEqual(payload.messages[4].content.map((b: Json) => Boolean(b.cache_control)), [false, true]);
+	assert.equal(countBreakpoints(payload), 4);
 });

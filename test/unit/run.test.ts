@@ -323,3 +323,22 @@ test("history: historyExchanges 0 sends nothing, not even the summary", () => {
 	assert.equal(hasHistory(run?.history), false);
 	assert.equal(run?.candidates.length, 1);
 });
+
+test("collectRun skips results judged at a mid-run checkpoint", () => {
+	const entries = [
+		user("q"),
+		assistant("", [{ id: "c1", name: "bash", arguments: {} }]),
+		toolResult("c1", "bash", big, "judged"),
+		assistant("", [{ id: "c2", name: "bash", arguments: {} }]),
+		toolResult("c2", "bash", big, "fresh"),
+		assistant("done"),
+	];
+	const run = collectRun(entries, options, new Set(["judged"]));
+	assert.deepEqual(
+		run?.candidates.map((c) => c.entryId),
+		["fresh"],
+	);
+	assert.equal(run?.toolResults, 2);
+	// Candidates carry only the public fields.
+	assert.deepEqual(Object.keys(run?.candidates[0] ?? {}).sort(), ["args", "entryId", "text", "toolName"]);
+});

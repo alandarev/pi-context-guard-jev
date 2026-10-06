@@ -48,7 +48,7 @@ test("computeStats sums context-guard custom entries", () => {
 });
 
 const identity: Colorize = (_color, text) => text;
-const empty: GuardStats = { distilledResults: 0, savedChars: 0, savedTokens: 0, runs: 0, requests: 0, costUsd: 0 };
+const empty: GuardStats = { distilledResults: 0, savedChars: 0, savedTokens: 0, runs: 0, checkpoints: 0, requests: 0, costUsd: 0 };
 
 test("formatStatus for each state", () => {
 	assert.equal(formatStatus(empty, "off", identity), "🛡 guard off");
@@ -69,4 +69,16 @@ test("formatCost", () => {
 	assert.equal(formatCost(0), "$0");
 	assert.equal(formatCost(0.00123), "$0.0012");
 	assert.equal(formatCost(1.234), "$1.23");
+});
+
+test("computeStats counts mid-run checkpoints among runs", () => {
+	const branch = [
+		{ type: "custom", customType: CUSTOM_TYPE, data: { v: 1, phase: "mid-run", requests: 2, costUsd: 0.001, results: [] } },
+		{ type: "custom", customType: CUSTOM_TYPE, data: { v: 1, phase: "run-end", requests: 1, costUsd: 0.001, results: [] } },
+		{ type: "custom", customType: CUSTOM_TYPE, data: { v: 1, requests: 1, costUsd: 0, results: [] } },
+	];
+	const stats = computeStats([], branch);
+	assert.equal(stats.runs, 3);
+	assert.equal(stats.checkpoints, 1);
+	assert.equal(stats.requests, 4);
 });

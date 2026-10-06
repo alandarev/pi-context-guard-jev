@@ -46,9 +46,9 @@ SCENARIOS.badge = [
 	"Quote, exactly as your very first broad search printed it, the match for src/api/jobStatus.ts line 3. " +
 		"Do not run a new search or read the file; get it from that earlier output.",
 ];
-// A long run (12+ tool calls) puts the question more than 20 cache positions back: this is where
-// the Anthropic question breakpoint matters (docs/CACHE.md).
-SCENARIOS.long = [
+// A run with 12+ sequential tool calls puts the question more than 20 cache positions back: this is
+// where the Anthropic question breakpoint matters (docs/CACHE.md). (Called "long" before 0.2.0.)
+SCENARIOS.sequential = [
 	"Where is the StatusBadge component used? Start with one broad case-insensitive search (rg -n -i status). " +
 		"Then open every file under src/pages, src/widgets, src/admin, src/layout and src/components with the read tool, " +
 		"strictly one read call per message: wait for each result before making the next call. " +
@@ -65,6 +65,14 @@ SCENARIOS.history = [
 		"(rg -n -i status), then narrow down as needed. Answer with file:line references.",
 	"Without running any new search or reading files, which API clients retry on HTTP 429 according to what you have " +
 		"already seen? If it's not in your context, use recall.",
+];
+// A long autonomous run (mid-run checkpoints): fix every failing test of a generated project
+// (test/e2e/make-long-fixture.mjs: 10 bugs in up to three layers; every suite run prints 10–30k
+// characters).
+SCENARIOS.long = [
+	"Fix all failing tests in this project. Work autonomously until the whole suite passes (npm test). " +
+		"Fix one bug at a time and run the full suite with plain `npm test` (no pipes, filters, head or tail) after every single fix. " +
+		"Don't ask me anything; don't stop until npm test is green.",
 ];
 const PROMPTS = SCENARIOS[scenario];
 if (!PROMPTS) {
@@ -84,7 +92,7 @@ mkdirSync(sessions, { recursive: true });
 // Never read the user's own context-guard settings: defaults, plus --config '{"key":value}' overrides.
 const configFile = join(out, "context-guard.json");
 writeFileSync(configFile, guardConfig ?? "{}");
-spawnSync(process.execPath, [join(HERE, "make-fixture.mjs"), repo], { stdio: "inherit" });
+spawnSync(process.execPath, [join(HERE, scenario === "long" ? "make-long-fixture.mjs" : "make-fixture.mjs"), repo], { stdio: "inherit" });
 
 const extArgs = [...exts.flatMap((p) => ["-e", p]), ...(withGuard ? ["-e", join(ROOT, "src/index.ts")] : []), "-e", join(HERE, "capture.ts")];
 const turns = [];
@@ -93,7 +101,7 @@ for (let i = 0; i < Math.min(turnsWanted, PROMPTS.length); i++) {
 	const res = spawnSync(
 		"pi",
 		["--mode", "json", "-ne", ...extArgs, "--session-dir", sessions, "--session-id", sessionId, "--model", model, "--thinking", thinking, PROMPTS[i]],
-		{ cwd: repo, env: { ...process.env, CG_CAPTURE_FILE: captureFile, CG_TURN: String(i + 1), PI_CONTEXT_GUARD_CONFIG: configFile }, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 15 * 60_000 },
+		{ cwd: repo, env: { ...process.env, CG_CAPTURE_FILE: captureFile, CG_TURN: String(i + 1), PI_CONTEXT_GUARD_CONFIG: configFile }, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: (scenario === "long" ? 60 : 15) * 60_000 },
 	);
 	writeFileSync(join(out, `turn-${i + 1}.events.jsonl`), res.stdout ?? "");
 	writeFileSync(join(out, `turn-${i + 1}.stderr.txt`), res.stderr ?? "");
@@ -188,10 +196,10 @@ if (t3 && isBadge) {
 	const stillVisible = t3Payload.includes(JSON.stringify(expected).slice(1, -1));
 	if (withGuard && !stillVisible) check("turn 3 used recall (line was distilled away)", t3.usedRecall, t3.toolCalls);
 }
-if (scenario === "long" && t1 && withGuard) {
-	check("long: turn 1 produced context edits", t1.edits.length > 0, t1.edits.length);
-	check("long: turn 1 made 10+ tool calls", t1.toolCalls.length >= 10, t1.toolCalls.length);
-	check("long: turn 1 had 10+ model requests (sequential calls)", t1.usage.length >= 10, t1.usage.length);
+if (scenario === "sequential" && t1 && withGuard) {
+	check("sequential: turn 1 produced context edits", t1.edits.length > 0, t1.edits.length);
+	check("sequential: turn 1 made 10+ tool calls", t1.toolCalls.length >= 10, t1.toolCalls.length);
+	check("sequential: turn 1 had 10+ model requests (sequential calls)", t1.usage.length >= 10, t1.usage.length);
 }
 if (scenario === "history" && t2) {
 	// Which clients really retry on 429 (the fixture is deterministic, but read it to be sure).
@@ -224,6 +232,77 @@ if (scenario === "history" && t2) {
 		check("history: turn 3 names exactly the clients that retry on 429", correct, { expected: retry429, named });
 	}
 }
+if (scenario === "long") {
+	// Timeline of the run: every assistant request with its context, and every checkpoint record.
+	const timeline = [];
+	for (const e of entries) {
+		if (e.type === "message" && e.message.role === "assistant") {
+			const u = e.message.usage ?? {};
+			timeline.push({ kind: "request", input: u.input ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0, output: u.output ?? 0, cost: u.cost?.total ?? 0 });
+		} else if (e.type === "custom" && e.customType === "context-guard") {
+			timeline.push({ kind: "guard", phase: e.data.phase ?? "run-end", data: e.data });
+		}
+	}
+	const requests = timeline.filter((t) => t.kind === "request").map((t) => ({ ...t, context: t.input + t.cacheRead + t.cacheWrite }));
+	const checkpoints = [];
+	timeline.forEach((t, i) => {
+		if (t.kind !== "guard") return;
+		const next = timeline.slice(i + 1).find((x) => x.kind === "request");
+		const before = timeline.slice(0, i).filter((x) => x.kind === "request").at(-1);
+		checkpoints.push({
+			phase: t.phase,
+			requestIndex: timeline.slice(0, i).filter((x) => x.kind === "request").length,
+			ms: t.data.ms,
+			costUsd: t.data.costUsd,
+			jevRequests: t.data.requests,
+			savedChars: t.data.savedChars,
+			results: t.data.results.map((r) => `${r.outcome} ${r.beforeChars}->${r.afterChars} ${r.reason} ${r.label}`),
+			before: before && { context: before.input + before.cacheRead + before.cacheWrite, cacheRead: before.cacheRead },
+			after: next && { input: next.input, cacheRead: next.cacheRead, cacheWrite: next.cacheWrite, context: next.input + next.cacheRead + next.cacheWrite },
+		});
+	});
+	const allCalls = summary.turns.flatMap((t) => t.toolCalls);
+	const isSuite = (c) => /npm (run )?test|node --test/.test(c);
+	const seen = new Map();
+	const repeats = [];
+	for (const c of allCalls) {
+		const key = c.replace(/"timeout":\d+/, "");
+		if (seen.has(key) && !isSuite(c)) repeats.push(c);
+		seen.set(key, true);
+	}
+	const suite = spawnSync("npm", ["test"], { cwd: repo, encoding: "utf8" });
+	const sparkChars = "▁▂▃▄▅▆▇█";
+	const maxCtx = Math.max(1, ...requests.map((r) => r.context));
+	summary.long = {
+		requests: requests.length,
+		contexts: requests.map((r) => r.context),
+		spark: requests.map((r) => sparkChars[Math.min(7, Math.floor((r.context / maxCtx) * 8))]).join(""),
+		maxContext: maxCtx,
+		totals: {
+			input: requests.reduce((n, r) => n + r.input, 0),
+			cacheRead: requests.reduce((n, r) => n + r.cacheRead, 0),
+			cacheWrite: requests.reduce((n, r) => n + r.cacheWrite, 0),
+			output: requests.reduce((n, r) => n + r.output, 0),
+			costUsd: requests.reduce((n, r) => n + r.cost, 0),
+		},
+		checkpoints,
+		jevCostUsd: checkpoints.reduce((n, c) => n + (c.costUsd ?? 0), 0),
+		suiteGreen: suite.status === 0,
+		recallCalls: allCalls.filter((c) => c.startsWith("recall ")).length,
+		repeatedNonSuiteCalls: repeats,
+		toolCalls: allCalls.length,
+	};
+	check("long: the suite is green afterwards", suite.status === 0, suite.stdout?.split("\n").filter((l) => /^ℹ (pass|fail)/.test(l)).join(" "));
+	// Checkpoints are required only when forced (break-even off); a default run may rightly make none.
+	const cfg = guardConfig ? JSON.parse(guardConfig) : {};
+	if (withGuard && cfg.midRun !== false && cfg.midRunBreakEven === false) check("long: at least one mid-run checkpoint (forced)", checkpoints.some((c) => c.phase === "mid-run"), checkpoints.length);
+	// After a checkpoint, the next request should still read the cached prefix (system/question at least).
+	if (withGuard && model.startsWith("anthropic/")) {
+		for (const c of checkpoints.filter((x) => x.phase === "mid-run" && x.after)) {
+			check(`long: request after the checkpoint at request ${c.requestIndex} reads the cached prefix`, (c.after.cacheRead ?? 0) >= (requests[0]?.cacheRead ?? 0) + (requests[0]?.cacheWrite ?? 0) * 0.9, { after: c.after, firstRequest: requests[0] });
+		}
+	}
+}
 if (model.startsWith("anthropic/")) {
 	check("anthropic requests stay within 4 breakpoints", summary.turns.every((t) => t.maxBreakpoints <= 4), summary.turns.map((t) => t.maxBreakpoints));
 }
@@ -237,6 +316,14 @@ for (const [i, t] of summary.turns.entries()) {
 	if (t.firstRequest) console.log(`first request: ${t.firstRequest.bytes} bytes, ${t.firstRequest.markers} markers, breakpoints ${JSON.stringify(t.firstRequest.breakpoints)}`);
 	for (const g of t.guard) console.log(`guard: saved ${g.savedChars} chars in ${g.ms} ms, ${g.requests} Jev req, $${g.costUsd.toFixed(5)}${g.timedOut ? " TIMEOUT" : ""}\n  ${g.results.join("\n  ")}`);
 	console.log(`answer: ${t.answer.slice(0, 400).replace(/\n/g, " ⏎ ")}`);
+}
+if (summary.long) {
+	const L = summary.long;
+	console.log(`\nlong: ${L.requests} requests, max context ${L.maxContext}, suite green: ${L.suiteGreen}, recall: ${L.recallCalls}, repeated non-suite calls: ${L.repeatedNonSuiteCalls.length}`);
+	console.log(`context: ${L.spark}`);
+	console.log(`every 5th request: ${L.contexts.filter((_, i) => i % 5 === 0).join(" ")}`);
+	console.log(`totals: ${JSON.stringify(L.totals)}; Jev $${L.jevCostUsd.toFixed(5)}`);
+	for (const c of L.checkpoints) console.log(`${c.phase} after request ${c.requestIndex}: saved ${c.savedChars} in ${c.ms} ms $${(c.costUsd ?? 0).toFixed(5)}; before ${JSON.stringify(c.before)} next ${JSON.stringify(c.after)}\n  ${c.results.join("\n  ")}`);
 }
 if (summary.history) console.log(`\nhistory: ${JSON.stringify(summary.history, null, 1)}`);
 console.log("\nchecks:");

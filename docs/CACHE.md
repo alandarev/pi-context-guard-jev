@@ -21,7 +21,8 @@ runs, not averages.
   Consecutive `tool_use` blocks count as one position, and so do consecutive `tool_result` blocks.
 - Entries with a longer TTL must come before entries with a shorter TTL.
 - Reading an entry refreshes its TTL. The docs do **not** say that reading a longer prefix refreshes a
-  shorter entry that was written separately.
+  shorter entry that was written separately; measured below, it does
+  ([Mid-run checkpoints](#mid-run-checkpoints)).
 - Pricing relative to base input: 5-minute write 1.25×, 1-hour write 2×, read 0.1× (0.05× on Opus 5.5).
 - The minimum cacheable prompt is 512 tokens on Sonnet/Opus 5.5.
 
@@ -97,8 +98,10 @@ had more than 4 breakpoints.
 
 Over WebSocket, Pi's `openai-codex` transport sends only the new input items with `previous_response_id`, as
 long as the input only grows. After an edit, the input is no longer an extension of the previous one, so
-Pi sends the full input. The server-side continuation is lost for that request, and the prompt cache is reused
-only up to the first edited item. This happens once, on the first request after the edit.
+Pi sends the full input. The server-side continuation is lost for that request, and in every measurement the
+cache read was at most the 2,560-token stable prefix, **wherever the first edited item was** (also when it
+was 18 turns into a run; see [Mid-run checkpoints](#mid-run-checkpoints)). This happens once, on the first
+request after the edit.
 
 ### Measured
 
@@ -111,6 +114,109 @@ GPT-6 Luna (openai-codex), badge scenario, turn 2 first request:
 | With the guard, one earlier run | 0 |
 
 The pin does not apply to OpenAI.
+
+## Mid-run checkpoints
+
+A checkpoint edits outputs from earlier in the *current* run, so the next request cannot read the run from
+cache beyond the first edited output. Two questions decide the design: does a cache entry at the
+unchanged prefix still exist when the checkpoint comes, possibly many minutes after it was written; and
+how much does the one-time rewrite cost against the per-request saving.
+
+### Do cache entries on the read path stay alive? (measured)
+
+`node test/e2e/ttl-probe.mjs` (Claude Sonnet 5.5, `pi-claude-auth`). The model `cat`s a ~31k-token file
+(entry A ends at that result, written once as Pi's rolling breakpoint), then makes further requests; at the
+end, the request after A is changed so that only A can be read.
+
+| Arm | Between writing A and the test request | Test request |
+|---|---|---|
+| refresh | 8 requests in 7.6 min, each marking A (5m) and reading the longer prefix | cacheRead **31,001** (A alive) |
+| control | the same 8 requests, A **not** marked again | cacheRead **30,999** (A alive) |
+| ttl1h | as refresh, A at `ttl: "1h"` | cacheRead 31,001; but switching the earlier breakpoints to 1h was itself a full miss (cacheRead 0 → 31,001 written at the 1h price) |
+| idle (5m) | **no request for 362 s** (Pi's cache warming stopped) | cacheRead **1,431**, cacheWrite 29,633 (A expired) |
+| idle1h | no request for 365 s, A at 1h | cacheRead 30,977 (A alive) |
+
+So the 5-minute TTL is real (idle), but **every request that reads a longer prefix keeps the shorter entries
+on its path alive** (control). During an active run (requests seconds apart, and Pi's own cache warming,
+setting `cacheWarming: "streaming"` by default, during long tool calls), every turn boundary that was once
+the rolling breakpoint stays readable. A 1-hour TTL is not needed and would cost a full rewrite at 2× once.
+The extension therefore keeps Pi's TTL (5m by default). Pi's warming requests go through
+`before_provider_request` (seen in the capture), so they carry the extension's breakpoints too.
+
+What the lookback limit still breaks: the request after an edit has its rolling breakpoint at the end; the
+first edited output is usually many more than 20 positions back. So every Anthropic request keeps the
+previous-question pin (the floor: system prompt and question; with `pi-claude-auth`, the relocated system
+prompt sits in that same user message), and the first request after any edits (checkpoint, run end, or
+another extension; the `context_edit` entries after the last answered assistant message) gets two more
+breakpoints (`cacheAnchors` in `src/checkpoint.ts`):
+
+- a **read point**, only at a cache entry this process saw itself write: a `tool_result` block that carried
+  a breakpoint in a request it sent, to the same model, still on the branch, and with no `context_edit` at
+  or before it and no compaction or branch summary since, written or read through within the last 5
+  minutes. A response refreshes an entry when its `cacheRead` shows the request read clearly past it: at
+  least the run's baseline (the full input of the run's first request) plus the characters from the
+  question to the entry divided by 1.5, which overestimates the tokens (code ≈ 2.3 characters per token).
+  This follows the control arm above. The latest trusted entry before the first edited entry is used. The
+  log lives in memory and is empty after a reload, so a read point is never inferred;
+- a **write anchor** at the end of the first edited tool-result batch, so the edited prefix gets an entry
+  that the next checkpoint can read. It enters the log only if it was really in the request.
+
+Budget: Pi uses 3 (API key: tools, system, rolling) or 4 breakpoints (OAuth: plus the identity
+`system[0]`; `pi-claude-auth`: tools, `system[1]`, question, rolling). To make room, the identity breakpoint
+(covered by `system[1]`) and then the tools breakpoint (covered by the system breakpoint) are dropped. If
+that is not enough, the write anchor goes first, then the read point; the question stays. Marks use the
+rolling breakpoint's TTL and are skipped if they would break the TTL order. Only breakpoints actually left in
+the payload are logged, so an anchor dropped for the budget is never treated as written.
+
+### The first request after a checkpoint (measured)
+
+Claude Sonnet 5.5, long scenario with settings that force checkpoints into a short run
+(`midRunBreakEven: false`, `midRunMinAgeTurns: 2`, `midRunBatchChars: 20000`), with `pi-claude-auth` and
+`test/e2e/plain-test-runs.ts`:
+
+| Configuration | Checkpoint | First edited output | Next request |
+|---|---|---|---|
+| default anchors | 1st (after request 3) | the run's first output | cacheRead **5,832** (system prompt + question, via the question pin), cacheWrite 10,867 |
+| default anchors | 2nd (after request 8) | 3 turns into the run | cacheRead **16,699** (read at the entry written after the 1st checkpoint), cacheWrite 22,778 |
+| default anchors | 3rd (after request 10) | 5 turns into the run | cacheRead **16,699**, cacheWrite 20,008 |
+| `pinAnthropicCache: false` | 1st | the run's first output | cacheRead 5,832, cacheWrite 29,570 |
+| `pinAnthropicCache: false` | 2nd, 3rd, 4th | 2–6 turns into the run | cacheRead **5,832** each time, cacheWrite 41,162 / 32,183 / 33,872 |
+
+Without the guard's breakpoints, every request after a checkpoint read only the system-and-question entry
+and rewrote the whole run. With them, the later checkpoints read up to the entry written by the first
+request after the first checkpoint. The first checkpoint of a run usually edits the run's first output, so
+only the system prompt and question can be read then. When a read point is placed, the write anchor often
+does not fit the budget (question, read point, `system[1]` and rolling take all four slots).
+
+GPT-6 Luna (openai-codex), long scenario, 8 checkpoints in 5 runs (default batch and age settings), at
+requests 13–30: the first request after every checkpoint read **2,560 or 0** tokens from cache (17k–29k
+uncached), against 35k–72k read on the request before it. That is the transport, not the position of the
+edit.
+
+### Economics and the break-even rule
+
+At the prices in these runs (Sonnet 5.5: input $2/M, 5m write $2.5/M, read $0.2/M; GPT-6 Luna: input
+$0.10/M, cached $0.01/M), a checkpoint costs once, and saves on every later request:
+
+- OpenAI Codex: the whole context is sent uncached once: extra ≈ 0.9 × context × input price.
+- Anthropic: everything after the read point is written again: extra ≈ (1.25 − 0.1) × rewritten tokens.
+- Saving per later request: the removed tokens × the cache-read price. Jev removed 60–90% of checkpoint
+  outputs in the runs.
+
+Measured (GPT, a run with two checkpoints): checkpoint 1 removed 57k characters; the next request was 17,144 tokens uncached
+(≈ $0.0015 extra) and every later request carried about 19k tokens less (≈ $0.0002 saved each): break-even
+after about 8 requests, and the run went on for 12 more. Checkpoint 2 needed about 9 requests and the run
+ended 2 requests later. On Anthropic the ratio of write to read price is larger (12.5:1 vs 10:1).
+
+So checkpoints pay for themselves only when the run goes on for roughly 8–30 more requests. The
+**break-even rule** (`midRunBreakEven`, on) skips a checkpoint unless
+`pending chars × turns so far ≥ factor × rewrite chars` (OpenAI: factor 13, rewrite = whole context;
+Anthropic: factor 16, rewrite = context after the read point the next request would get, or after the
+question when no logged entry is trusted, or the whole context with pinning off; other providers: factor
+16, rewrite = context from the first eligible output), assuming the run goes on
+about as long as it has run so far. In the measured Claude runs (8–14 requests) it never allowed a
+checkpoint; in the GPT runs (26–37 requests) it allowed one or two. Turn it off to checkpoint purely for
+context room.
 
 ## Cost model
 

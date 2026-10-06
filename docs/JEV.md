@@ -53,7 +53,7 @@ question per chunk separated them clearly: cited files 0.90–0.93, noise 0.14�
 A 30k-character grep with 28 chunks and 30 questions: **13,155 input tokens, 745 ms, $0.00055**. Code is
 about 2.3 characters per token.
 
-**Worst-case budget probe** (after earlier conversation was added to the state): every history part at its
+**Worst-case budget probe** (with earlier conversation in the state): every history part at its
 clip limit (2,000-character summary, 1,000-character first request, 800 + 1,200 characters per exchange),
 a 4,000-character question, a 6,000-character answer, 2,000 characters of notes, and one 40-chunk segment of
 31,848 characters of dense `rg` output over Pi's `dist/core`:
@@ -64,8 +64,8 @@ a 4,000-character question, a 6,000-character answer, 2,000 characters of notes,
 | 10 (maximum) | 83,214 | **23,619** | 799 ms | $0.00099 |
 
 Both fit Jev's 32k-token context with room to spare (the target was ≤ 28k), so `maxSegmentChars` is
-**32,000** (lowered from 40,000 to keep the worst case well below 32k now that history is included) and
-`maxChunksPerSegment` stays 40. Nested objects in the state (`earlier_conversation`) are accepted.
+**32,000**, which keeps the worst case well below 32k with history included, and `maxChunksPerSegment`
+is 40. Nested objects in the state (`earlier_conversation`) are accepted.
 
 In the live end-to-end runs, one qualifying run took 2 Jev requests: 550 ms and $0.00083 (GPT-6 Luna run), and
 1.18 s and $0.00084 (Claude run).
@@ -98,14 +98,14 @@ noise. It is off by default.
 ### Small reads are not worth it
 
 `read` results of about 2.3k characters always ended as `not-worth`: Jev kept 2 of 3 chunks. So
-`minResultChars` was raised to 4,000.
+`minResultChars` is 4,000.
 
 ### Earlier conversation (`historyExchanges`)
 
 Without history, Jev only sees the run's own question and answer. A broad search in a session whose goal was
 stated earlier ("I'm about to migrate every API client to a shared retry helper") then loses exactly the
 lines the ongoing work needs, because this run's question ("where is StatusBadge used?") does not mention
-them. So the state now carries `earlier_conversation`: the latest compaction/branch summary, the first
+them. So the state carries `earlier_conversation`: the latest compaction/branch summary, the first
 prompt and the last 3 exchanges (prompt + last assistant text), clipped (docs/DESIGN.md).
 
 **Wording.** Offline A/B on the real turn-2 run of the e2e `history` scenario (Claude's `rg -n -i status`,
@@ -126,28 +126,51 @@ still borderline (the relevant chunks sit around the threshold), so history make
 what the ongoing work needs, not reliably all of it; `recall` remains the safety net.
 
 **Live A/B** (`node test/e2e/run-e2e.mjs --scenario history`, with and without `--config
-'{"historyExchanges":0}'`). Turn 1 states the retry-migration goal, turn 2 is the broad StatusBadge search,
-turn 3 asks which clients retry on 429 without a new search (9 of the 10 clients do). Round 1 used the
-first wording above, round 2 the final one; one run per cell:
+'{"historyExchanges":0}'`), with the wording `src/decide.ts` sends. Turn 1 states the retry-migration goal,
+turn 2 is the broad StatusBadge search, turn 3 asks which clients retry on 429 without a new search (9 of
+the 10 clients do); one run per cell:
 
-| Model, history | Round | src/api retry lines kept in turn 2 (of 80; with 429) | Turn-2 output, chars before → after | Jev | Turn 3 used `recall` | Turn 3 answer |
-|---|---|---|---|---|---|---|
-| GPT-6 Luna, on | 1 | 0 | 36,113 → 1,772 | 518 ms | yes | correct |
-| GPT-6 Luna, off | 1 | 0 | 36,113 → 2,100 | 594 ms | no | wrong ("can't determine") |
-| Claude Sonnet 5.5, on | 1 | 0 | 36,113 → 2,612 | 685 ms | yes | correct |
-| Claude Sonnet 5.5, off | 1 | 8 (3) | 36,113 → 4,439 | 588 ms | yes | correct list; headline says "10" |
-| GPT-6 Luna, on | 2 | **72 (21)** | 36,113 → 12,402 | 568 ms | yes | correct |
-| GPT-6 Luna, off | 2 | 0 | 36,113 → 1,753 | 564 ms | yes | correct |
-| Claude Sonnet 5.5, on | 2 | 5 (1) | 22,641 → 2,103 (Claude ran `rg … \| head -200`) | 555 ms | yes | missed `ticketStatus` (cut by Claude's own `head -200`) |
-| Claude Sonnet 5.5, off | 2 | 0 | 36,113 → 2,638 | 547 ms | yes | correct list; headline says "eight" |
+| Model, history | src/api retry lines kept in turn 2 (of 80; with 429) | Turn-2 output, chars before → after | Jev | Turn 3 used `recall` | Turn 3 answer |
+|---|---|---|---|---|---|
+| GPT-6 Luna, on | **72 (21)** | 36,113 → 12,402 | 568 ms | yes | correct |
+| GPT-6 Luna, off | 0 | 36,113 → 1,753 | 564 ms | yes | correct |
+| Claude Sonnet 5.5, on | 5 (1) | 22,641 → 2,103 (Claude ran `rg … \| head -200`) | 555 ms | yes | missed `ticketStatus` (cut by Claude's own `head -200`) |
+| Claude Sonnet 5.5, off | 0 | 36,113 → 2,638 | 547 ms | yes | correct list; headline says "eight" |
 
-Honest reading: with the first wording, history made no difference to what was kept (0 retry lines with
-history; the one run that kept 8 had history off). With the final wording, GPT round 2 kept 72 of the 80
-retry lines (9 of the 10 clients), at the cost of keeping 12.4k instead of ~1.8k characters; Claude round 2
-ran a different, truncated search (`| head -200`) and kept 5. It did not change turn-3 behaviour: the main models used `recall` in 7 of 8
-runs either way, and the turn-3 answers were about as good with and without history. Where history pays
-off is the context the model already has after turn 2, which avoids the recall round trip only when enough
-is kept. Single runs per cell; the variance between rounds is large.
+With history, GPT kept 72 of the 80 retry lines (9 of the 10 clients), at the cost of keeping 12.4k instead
+of ~1.8k characters; Claude ran a truncated search and kept 5. A round with the second wording of the
+table above kept no retry lines with history. History did not change turn-3 behaviour: the models used
+`recall` either way, and the answers were about as good. Where it pays off is the context the model already
+has after turn 2. Single runs per cell; the variance between runs is large.
+
+### Checkpoint wording
+
+Mid-run checkpoints ask a different question: there is no final answer, so Jev judges whether the agent
+will still need an output to finish the task (`buildCheckpointRequest`; state and wording in
+[DESIGN.md](DESIGN.md#mid-run-checkpoints)). Probed offline on real mid-run states from two no-guard runs
+of the e2e `long` scenario (`fix all failing tests`), two repetitions per variant, reporting the share of
+the output's characters that would be kept at chunk thresholds 0.5 / 0.55 / 0.6:
+
+| Output (state) | What should happen | base wording | "acted" wording |
+|---|---|---|---|
+| GPT, 6 old `npm test` logs, each rerun later (`superseded`) | mostly go | 0.5: 15–69%, 0.6: **8–36%** | 0.5: 15–45%, 0.6: 15–30% |
+| Claude, first `npm test` log (still the only full failure list; later runs were filtered) | keep the unresolved failures | 0.5: 73–80%, 0.6: 35–41% | 0.5: 80–87%, 0.6: 33–46% |
+| Claude, `cat` of 5 source files, **all fixed since** | go | 0.5: 49–62%, 0.6: **11%** | 11% at every threshold |
+| Claude, the same `cat` one turn after it ran, **files not fixed yet** | stay | 0.5: 100%, 0.6: **78%** | 0.5: 90%, 0.6: **10%** |
+
+- *base*: "To finish user_question, will the agent still need the lines in chunk_N? Lines that are out of
+  date or that the agent has already acted on and moved past are not needed."
+- *acted*: "Will the agent need to look at chunk_N again before it finishes user_question? Say no if
+  later_tool_calls show the agent already acted on it, or if superseded says a newer version exists."
+  It dropped the in-use files (10%) and was rejected.
+- A stronger `superseded` sentence ("the agent still sees that newer output…"), with the acted wording, did not help (15–65% at 0.5).
+
+Mid-run probabilities are compressed (per-chunk 0.14–0.76, against 0.14–0.93 at run end). At 0.5,
+superseded logs and finished files kept 50–70%, which `maxKeepRatio` (0.6) would then turn into "not
+worth it", so most checkpoints would edit nothing. **Base wording at 0.6** separated the cases: in-use
+files 78%, finished files 11%, superseded logs 8–36%. So `midRunChunkKeepThreshold` defaults to 0.6, the
+same as run end, not lower: the brief proposed starting at 0.5 to keep more, and the probe showed that
+0.5 keeps nearly everything.
 
 ## The final question set
 
@@ -175,5 +198,6 @@ answer did not quote but that a natural next question would need.
 | `noneThreshold` | 0.5 | Remove a whole output only if `none` wins and no chunk passes its own question |
 | `maxKeepRatio` | 0.6 | If most of the output is kept anyway, the saving does not justify the cache miss and the lost context |
 | `minResultChars` | 4,000 | Reads around 2.3k characters were never worth an edit |
+| `midRunChunkKeepThreshold` | 0.6 | Checkpoint probe above: 0.5 kept 50–100% of everything; 0.6 kept in-use files and dropped finished ones |
 
 When an answer is missing, the request fails or the budget runs out, the extension keeps everything.

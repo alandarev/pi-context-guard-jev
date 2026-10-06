@@ -8,7 +8,10 @@ import { type Chunk, chunkOutput, DEFAULT_CHUNK_OPTIONS, segmentChunks } from ".
 import { buildRequest, citedFiles, type DecideThresholds, interpret, type SegmentDecision } from "./decide.ts";
 import { renderReplacement, toolLabel } from "./render.ts";
 import type { Candidate, RunInfo } from "./run.ts";
-import type { ClassifierResponse, ClassifyFn, ContextEditDraft } from "./types.ts";
+import type { ClassifierRequest, ClassifierResponse, ClassifyFn, ContextEditDraft } from "./types.ts";
+
+/** Builds the Jev request for one segment; defaults to the run-end request (`buildRequest`). */
+export type RequestBuilder = (candidate: Candidate, segment: readonly Chunk[], segmentIndex: number, segmentCount: number, totalLines: number) => ClassifierRequest;
 
 export interface DistillOptions extends DecideThresholds {
 	minRunChars: number;
@@ -18,6 +21,8 @@ export interface DistillOptions extends DecideThresholds {
 	concurrency: number;
 	maxSegmentChars: number;
 	maxChunksPerSegment: number;
+	/** Mid-run checkpoints pass their own request builder. */
+	requestBuilder?: RequestBuilder;
 }
 
 export type ResultOutcome = "distilled" | "removed" | "kept";
@@ -128,7 +133,9 @@ export async function distillRun(
 	try {
 		await pool(tasks.filter((task) => !task.decision), options.concurrency, signal, async (task) => {
 			const candidate = run.candidates[task.candidate];
-			const request = buildRequest(run, candidate, task.segment, task.segmentIndex, task.segmentCount, task.totalLines);
+			const request = options.requestBuilder
+				? options.requestBuilder(candidate, task.segment, task.segmentIndex, task.segmentCount, task.totalLines)
+				: buildRequest(run, candidate, task.segment, task.segmentIndex, task.segmentCount, task.totalLines);
 			outcome.requests++;
 			try {
 				// Race the request against the budget: a provider that ignores the signal must not

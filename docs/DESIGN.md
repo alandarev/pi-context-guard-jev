@@ -9,26 +9,31 @@ evidence behind the thresholds are in [JEV.md](JEV.md). Cache behaviour is in [C
 |---|---|
 | `src/index.ts` | The only module that uses the Pi API: hooks, `recall` tool, `/guard` command, status bar, classifier lookup |
 | `src/config.ts` | `DEFAULT_CONFIG`, validation (`normalizeConfig`), load/save of `context-guard.json`, `provider/id` parsing |
-| `src/run.ts` | `collectRun`: finds the run that just finished, its question, answer, notes and candidate tool results |
+| `src/run.ts` | `collectRun`: finds the run that just finished, its question, answer, notes and candidate tool results; the shared span and candidate rules |
+| `src/checkpoint.ts` | Mid-run checkpoints: eligible outputs (`collectCheckpoint`), superseded detection, the memo and pending edits from the branch, the read point, the break-even rule |
 | `src/chunk.ts` | `chunkOutput` (grep-aware chunking) and `segmentChunks` (grouping chunks into Jev requests) |
-| `src/decide.ts` | `buildRequest` (the Jev request) and `interpret` (answers → keep set); `citedFiles` |
+| `src/decide.ts` | `buildRequest` (the run-end Jev request), `buildCheckpointRequest` (the mid-run one) and `interpret` (answers → keep set); `citedFiles` |
 | `src/distill.ts` | `distillRun`: chunk, run Jev requests in parallel within a time budget, decide per result, build `context_edit` drafts |
 | `src/render.ts` | The replacement text: header, verbatim chunks, omission lines; the `[context-guard]` marker |
-| `src/cache-pin.ts` | Anthropic breakpoint at the previous user question |
+| `src/cache-pin.ts` | Anthropic breakpoints: the previous user question, and the read point after edits (`placeGuardBreakpoints`) |
 | `src/stats.ts` | Savings and Jev usage computed from the session; status-bar text |
 | `src/recall.ts` | The text returned by `recall` |
 | `src/types.ts` | Loose structural types for the Pi objects used, so the pure modules can be tested without Pi |
 
 Everything except `index.ts` is pure. `distillRun` gets the classifier as an injected function.
 
-## The boundary: `agent_before_settle`
+## The boundaries: `agent_before_settle` and `turn_end`
 
-The work happens in `agent_before_settle`, and only when `event.outcome === "completed"` and the guard is on.
+Run-end distillation happens in `agent_before_settle`, and only when `event.outcome === "completed"` and
+the guard is on. Long runs also get mid-run checkpoints at `turn_end` (see
+[Mid-run checkpoints](#mid-run-checkpoints)); everything below about drafts applies to both.
 
 Why there:
 
 - The final answer exists, so relevance can be judged against it. Pruning during a run would take raw
   data away from the model while it still needs it, and every edit would break the prompt cache again.
+  Mid-run checkpoints accept those costs only for outputs that are several turns old, in rare batches,
+  and only when the break-even rule says they pay off.
 - A boundary handler can return session entry drafts. A `context_edit` draft is append-only: it changes
   only what the model sees from then on. The raw entry stays in the session file, the UI and exports, and
   `ctx.sessionManager.getEntry(id)` still returns it. That is what `recall` reads.
@@ -45,9 +50,11 @@ Hooks used:
 | Hook | Use |
 |---|---|
 | `session_start` | Load settings, check the classifier model and credential, draw the status |
-| `agent_before_settle` | Distill the finished run |
-| `before_provider_request` | Pin the Anthropic cache breakpoint (only for `anthropic-messages` models) |
-| `session_tree`, `session_compact`, `agent_settled` | Redraw the status |
+| `turn_end` | Mid-run checkpoint, when a batch is due |
+| `agent_before_settle` | Distill the finished run (skipping outputs judged mid-run) |
+| `before_provider_request` | Anthropic breakpoints (only for `anthropic-messages` models) |
+| `session_tree`, `session_compact` | Redraw the status (checkpoint state is read from the branch anyway) |
+| `agent_settled` | Redraw the status |
 
 ## Algorithm
 
@@ -186,6 +193,101 @@ In this order:
   usually already cleared at this boundary, so Esc does not cancel it; the time budget is the limit.
 - An exception from the whole pass shows a warning and leaves the run untouched.
 
+## Mid-run checkpoints
+
+A 30–120 minute autonomous run would otherwise carry every tool output until it ends; Pi compacts only
+near the window minus 16k tokens. Checkpoints judge older outputs while the run is still going.
+
+**Hook (verified on Pi 1.0.3).** `turn_end` is an actionable boundary (`TurnEndEvent extends
+BoundaryState`). `agent-session.js` dispatches it from `agent.finishTurn`, commits the returned drafts
+(`_commitBoundaryDrafts` → `_refreshFinalizedContext`), and only then runs `prepareNextTurn`, which rebuilds
+the messages from the session projection and runs the turn-end compaction check
+(`_compactBeforeNextAssistantResponse`). So a `context_edit` returned at `turn_end` reaches the very next
+provider request, before any compaction decision; the e2e runs confirm it (the next request's context
+drops by the removed amount). The runner replaces the draft list as for `agent_before_settle`, so the
+handler returns `[...event.entries, ...edits, record]`, and it never asks for `continue`.
+
+**When.** At the end of a turn whose assistant message has tool calls (the final turn of a run is left to
+run-end distillation), with `outcome: "completed"` and `midRun` on:
+
+1. **Eligible outputs** (`collectCheckpoint`): tool results of the current run that pass the candidate
+   rules above, whose call was made at least `midRunMinAgeTurns` (4) turns before the current turn
+   (turn = assistant message index in the run), and that are not in the memo.
+2. **Batch:** their total must reach `midRunBatchChars` (60,000; `midRunBatchCharsOpenAI` for
+   `openai-codex` models). Small outputs therefore accumulate, and edits come in rare batches.
+3. **Break-even** (`midRunBreakEven`): the checkpoint must be likely to pay for its one-time cache
+   rewrite: `pending chars × turns so far ≥ factor × rewrite chars`, with factor 13 and the whole context
+   for OpenAI Codex; factor 16 for Anthropic, where the rewrite is the context after the read point the
+   next request would get (the latest trusted entry before the first eligible output, `trustedReadPoint`)
+   or, without one, after the question (the floor; with `pinAnthropicCache` off, the whole context); and
+   factor 16 and the context from the first eligible output on for other providers
+   (derivation in `checkpoint.ts` and [CACHE.md](CACHE.md#mid-run-checkpoints)). "Turns so far" stands in
+   for the turns still to come.
+
+Then all eligible outputs go to `distillRun` with the checkpoint request builder and
+`chunkKeepThreshold = midRunChunkKeepThreshold` (0.6), under the same `timeoutMs` budget, abort signal and
+keep-on-error rules, with the busy status and working message shown.
+
+**The checkpoint request** (`buildCheckpointRequest`; separate from the run-end request): there is no final
+answer yet. The state holds `situation` (the agent is still working; this is an earlier call's output),
+`earlier_conversation`, `user_question`, `agent_progress` (`latest_note`: the latest assistant text, at
+most 2,000 characters; `earlier_notes`: earlier text of the run, clipped from the start to 2,000),
+`later_tool_calls` (labels of the calls made after this output, oldest first; above 30 the first and last
+15 with a gap note), `superseded` when it applies, and then tool, status, arguments, size and chunks as at
+run end. The questions ask whether the agent will still need the output (or chunk) to finish
+`user_question`; out-of-date lines and lines it has already acted on and moved past are not needed. The
+probe behind the wording and the threshold is in [JEV.md](JEV.md#checkpoint-wording).
+
+**Superseded** (`supersededBy`), judged from the later tool calls: a `read` whose file was later changed by
+`edit`/`write` ("this file was changed after this read (edit src/a.ts, 3 turns later)") or read again with
+the same offset and limit; a command that ran again (whitespace and a trailing `2>&1` normalized); any other
+tool called again with identical arguments.
+
+**State from the branch.** The memo and the pending edits are derived, at that moment, from the entries
+persisted on the active branch (`ctx.sessionManager.getBranch()`). A boundary's drafts are not final: a
+later handler can replace the list, and one invalid draft makes Pi discard all of them; state taken from
+the returned drafts would then skip those outputs forever. Reading the branch also makes `/tree`,
+compaction and reloads correct without any rebuild step. The only in-memory state is the log of cache
+entries this process wrote (below), which only ever adds a read point.
+
+**Memo.** Each output is judged mid-run at most once. The memo is the set of results in the mid-run records
+on the branch, except those Jev never answered for (`timeout`, `error`, `aborted`), which the next checkpoint
+asks again. A "keep" is therefore not re-asked at every checkpoint.
+
+**Run end judges kept outputs again.** An output kept at a checkpoint (whole, or `not-worth`) is a
+candidate again at run end, this time with the final answer: files the agent was still editing are usually not
+needed once the task is done. Distilled outputs carry the marker and are skipped by the candidate rules.
+
+**Anthropic breakpoints** (`placeGuardBreakpoints`). Every Anthropic request gets the previous-question
+pin (the floor; with `pi-claude-auth` that block also carries the relocated system prompt). On the first
+request after **pending edits** (`context_edit` entries on the branch after the last answered assistant
+message, whether from a checkpoint, from run end on the next prompt, or from another extension; a failed or
+aborted response does not count, since its retry repeats the request), `cacheAnchors` adds up to two more:
+
+- **Read point**, only at a cache entry this process saw itself write. After placing its breakpoints, the
+  extension records every `tool_result` block that carries a breakpoint in the payload (Pi's rolling one
+  and its own): entry id, model, time, and the last branch entry at that moment. An entry is trusted only
+  if the same model wrote it, or read through it, within the TTL (5 minutes), the entry and that last
+  branch entry are still on the branch, and since then no `context_edit` touched anything at or before it
+  and no compaction or branch summary was appended. The latest trusted entry before the first edited entry
+  is the read point. The log is cleared on `session_start` (and so on reload); anything uncertain falls
+  back to the question pin.
+- **Refresh on read-through** (`message_end`, `refreshOnReadThrough`): reading a longer prefix keeps the
+  entries on its path alive (CACHE.md), so a response moves a logged entry's time to its request's time
+  when the request went to the same model, the entry's prefix is unchanged, and `cacheRead` reaches past
+  the entry with a margin: at least the run's baseline (the full input of its first request: system prompt,
+  tools, question) plus the projected characters from the question to the entry divided by 1.5. Code and
+  logs run at about 2.3 characters per token and prose at about 4, so this overestimates the tokens up to
+  the entry. Without a baseline, or with any doubt, nothing is refreshed.
+- **Write anchor:** the end of the tool-result batch holding the first edited entry, so the edited prefix
+  gets an entry that a later checkpoint can read. It counts as written only once it was seen in a request
+  the extension sent (the same log).
+
+Priority under the 4-breakpoint budget: after dropping Pi's redundant identity and tools breakpoints, the
+question comes first, then the read point, then the write anchor. Cache-warming replays add no assistant
+message, so they get the same breakpoints. Measured effect and the TTL findings:
+[CACHE.md](CACHE.md#mid-run-checkpoints).
+
 ## Replacement format (`render.ts`)
 
 Kept chunks are copied verbatim, in order. Each run of removed chunks becomes one omission line. For
@@ -208,11 +310,13 @@ The draft is `{ type: "context_edit", targetId, replacement: { content: [{ type:
 
 ## The `context-guard` record
 
-Each run that made at least one Jev request also appends a custom entry (`customType: "context-guard"`):
+Each run (and each mid-run checkpoint) that made at least one Jev request also appends a custom entry
+(`customType: "context-guard"`):
 
 | Field | Meaning |
 |---|---|
 | `v` | Format version, `1` |
+| `phase` | `"mid-run"` for checkpoints, `"run-end"` otherwise (a record without it counts as run end) |
 | `model` | Classifier used |
 | `savedChars` | Characters removed by this run's edits |
 | `requests`, `inputTokens`, `costUsd`, `ms` | Jev usage for the run |
@@ -222,7 +326,8 @@ Each run that made at least one Jev request also appends a custom entry (`custom
 `reason` is one of `chunks`, `none-needed`, `not-worth`, `all-chunks`, `whole-needed`, `whole-chosen`,
 `no-answer`, `error` or `timeout` (several are joined with commas). `jev` holds one trace per segment, such as
 `kw.15 focus=chunk_4:.52 keep 9/29` or `kw.82 focus=whole:.71 keep all (whole-needed)`. That is
-P(`keep_whole`), the focus choice and its probability, and the result. `/guard` prints these for the last run.
+P(`keep_whole`), the focus choice and its probability, and the result. `/guard` prints these for the last
+record (run or checkpoint) and counts the checkpoints.
 
 The extension does not write Jev's usage into Pi's own usage entries. It is recorded only here.
 
@@ -252,6 +357,8 @@ not a tool result gives an error that tells the model to use the id from a `[con
 
 ## Pitfalls
 
+- **Never advance state on returned drafts.** A later handler may replace them, or Pi may reject the list;
+  read state back from the branch.
 - **Never use `replacement: null` on a tool result.** The matching `tool_use` would lose its result, and
   providers reject the request. A fully removed result is always replaced with a one-line stub.
 - **Never edit assistant messages.** A replacement turns the content into one text block, which drops
@@ -261,18 +368,15 @@ not a tool result gives an error that tells the model to use the id from a `[con
 - **`keepCitedFiles` is off by default.** Answers also name files to rule them out. In a live run, Claude's
   answer said `test/fixtures/entities.json` was *not* a usage, and the option kept 40 lines of noise from
   that file. See [JEV.md](JEV.md).
-- **Only the run that just finished is edited.** Editing older runs would break the prompt cache from that
-  point on, for every later turn.
+- **Only the current run is edited.** Editing older runs would break the prompt cache from that point on,
+  for every later turn. Mid-run checkpoints edit the current run's older outputs (each judged once mid-run;
+  kept ones again at run end).
 - **Don't distill from a `context` hook.** Output that varies between requests makes every request miss the
   cache.
 
 ## Open questions
 
-1. Do Pi's cache-warming replays (`cache-warmer.js`, `streamSimple`) go through `before_provider_request`?
-   If not, warm requests do not carry the question breakpoint. Not checked.
-2. Should the pin go on the last unedited tool result instead of the question? That would keep more of the
-   run cached on the next prompt. Not tried.
-3. Other classifier entries (e.g. `typesafe/jev-latest` with a 64k context) and non-code outputs have
+1. Other classifier entries (e.g. `typesafe/jev-latest` with a 64k context) and non-code outputs have
    not been tested.
-4. The OpenAI Codex WebSocket transport loses its delta continuation after an edit
+2. The OpenAI Codex WebSocket transport loses its delta continuation after an edit
    ([CACHE.md](CACHE.md#openai)). It is not clear whether anything can be done about that from an extension.

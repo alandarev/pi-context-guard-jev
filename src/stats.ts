@@ -14,6 +14,8 @@ export const CUSTOM_TYPE = "context-guard";
 /** Data stored in each `context-guard` custom entry (one per distilled run). */
 export interface RunRecordData {
 	v: 1;
+	/** "mid-run" for checkpoints; a record without it counts as run end. */
+	phase?: "mid-run" | "run-end";
 	model: string;
 	savedChars: number;
 	requests: number;
@@ -42,6 +44,8 @@ export interface GuardStats {
 	/** Rough token equivalent (Pi's own estimate: chars / 4). */
 	savedTokens: number;
 	runs: number;
+	/** Mid-run checkpoints among `runs`. */
+	checkpoints: number;
 	requests: number;
 	costUsd: number;
 	last?: RunRecordData;
@@ -50,7 +54,7 @@ export interface GuardStats {
 export const estimateTokens = (chars: number): number => Math.round(chars / 4);
 
 export function computeStats(projection: readonly ProjectedEntryLike[], branch: readonly { type?: string; customType?: string; data?: unknown }[]): GuardStats {
-	const stats: GuardStats = { distilledResults: 0, savedChars: 0, savedTokens: 0, runs: 0, requests: 0, costUsd: 0 };
+	const stats: GuardStats = { distilledResults: 0, savedChars: 0, savedTokens: 0, runs: 0, checkpoints: 0, requests: 0, costUsd: 0 };
 	for (const entry of projection) {
 		const projected = entry.messages[0];
 		const raw = entry.sourceEntry.message;
@@ -68,6 +72,7 @@ export function computeStats(projection: readonly ProjectedEntryLike[], branch: 
 		const data = entry.data as Partial<RunRecordData> | undefined;
 		if (!data || data.v !== 1) continue;
 		stats.runs++;
+		if (data.phase === "mid-run") stats.checkpoints++;
 		stats.requests += data.requests ?? 0;
 		stats.costUsd += data.costUsd ?? 0;
 		stats.last = data as RunRecordData;

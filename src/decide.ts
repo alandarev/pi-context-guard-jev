@@ -11,6 +11,8 @@
  * can only name the most important chunk; the per-chunk yes/no questions add the others.
  */
 import type { Chunk } from "./chunk.ts";
+import type { CheckpointCandidate, CheckpointInfo } from "./checkpoint.ts";
+import { recentNotes } from "./checkpoint.ts";
 import { type Candidate, hasHistory, type RunHistory, type RunInfo } from "./run.ts";
 import { type ClassifierQuestion, type ClassifierRequest, type ClassifierResponse, clip } from "./types.ts";
 
@@ -116,6 +118,78 @@ export function buildRequest(
 				? `Does ${label} contain lines that final_answer relies on, or that the user's ongoing task in earlier_conversation will need, even if the current question is about something else?`
 				: `Does ${label} contain lines that final_answer relies on, or that a likely follow-up question about it would need?`,
 			criteria: { true: `Keep ${label}`, false: `${label} is noise for this answer` },
+		};
+	}
+	return { state, questions };
+}
+
+const PROGRESS_LIMIT = 2_000;
+
+/**
+ * Request for a mid-run checkpoint: there is no final answer yet, so Jev judges whether the agent
+ * will still need the output to finish the task (docs/JEV.md → Checkpoint wording). The run-end
+ * wording in `buildRequest` is untouched.
+ */
+export function buildCheckpointRequest(
+	info: Pick<CheckpointInfo, "question" | "history" | "latest" | "notes">,
+	candidate: CheckpointCandidate,
+	segment: readonly Chunk[],
+	segmentIndex: number,
+	segmentCount: number,
+	totalLines: number,
+): ClassifierRequest {
+	const withHistory = hasHistory(info.history);
+	const state: Record<string, unknown> = {
+		situation:
+			"A coding agent is still working on user_question; it has not finished yet. This is the output of one of its earlier tool " +
+			"calls, split into chunks. From now on the agent will only see the chunks we keep, plus a note that the rest was removed " +
+			"and can be fetched again. later_tool_calls shows what the agent did after this call." +
+			(withHistory ? " earlier_conversation shows the session before this task." : ""),
+	};
+	if (withHistory) state.earlier_conversation = describeHistory(info.history);
+	state.user_question = clip(info.question, QUESTION_LIMIT);
+	const progress: Record<string, string> = {};
+	if (info.latest.trim()) progress.latest_note = clip(info.latest, PROGRESS_LIMIT);
+	if (info.notes.trim()) progress.earlier_notes = recentNotes(info.notes, PROGRESS_LIMIT);
+	if (Object.keys(progress).length > 0) state.agent_progress = progress;
+	state.later_tool_calls = candidate.laterCalls.length > 0 ? candidate.laterCalls : "none yet";
+	if (candidate.superseded) state.superseded = candidate.superseded;
+	state.tool = candidate.toolName;
+	if (candidate.isError) state.tool_status = "failed (the tool reported an error, e.g. a non-zero exit code).";
+	const args = describeArgs(candidate.args);
+	if (args) state.tool_arguments = args;
+	state.output_size = `${totalLines} lines${segmentCount > 1 ? `; this is part ${segmentIndex + 1} of ${segmentCount}` : ""}`;
+	state.chunks = Object.fromEntries(segment.map((chunk) => [chunkLabel(chunk), chunk.text]));
+
+	const scope = segmentCount > 1 ? "this part of the tool output" : "the tool output";
+	const focusCriteria: Record<string, string> = {
+		whole: `Most of ${scope} will still be needed`,
+		none: `Nothing in ${scope} will be needed again`,
+	};
+	for (const chunk of segment) {
+		const label = chunkLabel(chunk);
+		focusCriteria[label] = `A few chunks will still be needed; ${label} is the most important of them`;
+	}
+	const questions: Record<string, ClassifierQuestion> = {
+		keep_whole: {
+			type: "bool",
+			instructions: `To finish user_question, will the agent still need all of ${scope}, so that removing any chunk would lose information it is likely to use again?`,
+			criteria: { true: "Keep everything", false: "Some chunks will not be needed again and can be removed" },
+		},
+		focus: {
+			type: "choice",
+			instructions:
+				`Will the rest of the agent's work draw on most of ${scope}, or on a few chunks? If a few, pick the most important chunk. ` +
+				"If nothing in it will be needed again (for example because it is out of date or the agent has moved past it), pick none.",
+			criteria: focusCriteria,
+		},
+	};
+	for (const chunk of segment) {
+		const label = chunkLabel(chunk);
+		questions[label] = {
+			type: "bool",
+			instructions: `To finish user_question, will the agent still need the lines in ${label}? Lines that are out of date or that the agent has already acted on and moved past are not needed.`,
+			criteria: { true: `Keep ${label}`, false: `${label} will not be needed again` },
 		};
 	}
 	return { state, questions };

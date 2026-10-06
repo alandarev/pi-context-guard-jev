@@ -66,52 +66,103 @@ export const NO_TEXT_QUESTION = "[the user sent only an image]";
  * during a run are user messages too, so they start a new span; tool results before them are
  * left for later (they stay unpruned, which is the safe direction).
  */
-export function collectRun(entries: readonly ProjectedEntryLike[], options: CollectOptions): RunInfo | undefined {
+/** Index of the entry holding the user message that starts the current run, or -1. */
+export function findRunStart(entries: readonly ProjectedEntryLike[]): number {
 	let start = entries.length - 1;
 	while (start >= 0 && !entries[start].messages.some((m) => m.role === "user")) start--;
-	if (start < 0) return undefined;
+	return start;
+}
 
+/** The run's question: the text of the user message at `start`. */
+export function questionAt(entries: readonly ProjectedEntryLike[], start: number): string {
 	const questionMessage = entries[start].messages.findLast((m) => m.role === "user");
 	const questionText = questionMessage ? textOf(questionMessage).trim() : "";
-	const question = questionText ? textOf(questionMessage as MessageLike) : NO_TEXT_QUESTION;
-	const span = entries.slice(start + 1);
+	return questionText ? textOf(questionMessage as MessageLike) : NO_TEXT_QUESTION;
+}
 
-	const assistantTexts: string[] = [];
-	const toolCalls = new Map<string, { name: string; args: Record<string, unknown> | undefined }>();
+export interface ToolCallInfo {
+	name: string;
+	args: Record<string, unknown> | undefined;
+	/** 0-based index of the assistant message (turn) in the run that made the call. */
+	turn: number;
+}
+
+/** Tool calls of a run span by id, and the assistant texts in order (with their turn). */
+export function indexSpan(span: readonly ProjectedEntryLike[]): { toolCalls: Map<string, ToolCallInfo>; assistantTexts: { turn: number; text: string }[]; turns: number } {
+	const toolCalls = new Map<string, ToolCallInfo>();
+	const assistantTexts: { turn: number; text: string }[] = [];
+	let turn = -1;
 	for (const entry of span) {
 		for (const message of entry.messages) {
-			if (message.role !== "assistant" || typeof message.content === "string") continue;
+			if (message.role !== "assistant") continue;
+			turn++;
+			if (typeof message.content === "string") continue;
 			const text = textOf(message).trim();
-			if (text) assistantTexts.push(text);
+			if (text) assistantTexts.push({ turn, text });
 			for (const block of message.content) {
 				if (block.type === "toolCall" && typeof block.id === "string") {
 					const args = block.arguments && typeof block.arguments === "object" ? (block.arguments as Record<string, unknown>) : undefined;
-					toolCalls.set(block.id, { name: String(block.name ?? ""), args });
+					toolCalls.set(block.id, { name: String(block.name ?? ""), args, turn });
 				}
 			}
 		}
 	}
-	const answer = assistantTexts.at(-1) ?? "";
-	const notes = assistantTexts.slice(0, -1).join("\n\n");
+	return { toolCalls, assistantTexts, turns: turn + 1 };
+}
 
-	const exclude = new Set(options.excludeTools);
+/** The candidate rules (see docs/DESIGN.md → Candidates) for one projected entry, or undefined. */
+export function candidateOf(
+	entry: ProjectedEntryLike,
+	toolCalls: ReadonlyMap<string, ToolCallInfo>,
+	options: CollectOptions,
+): (Candidate & { toolCallId?: string; turn?: number }) | undefined {
+	const message = entry.messages[0];
+	if (entry.messages.length !== 1 || message?.role !== "toolResult") return undefined;
+	if ((message.isError && !options.distillErrors) || !isTextOnly(message)) return undefined;
+	const call = message.toolCallId ? toolCalls.get(message.toolCallId) : undefined;
+	const toolName = message.toolName ?? call?.name ?? "tool";
+	if (options.excludeTools.includes(toolName)) return undefined;
+	const text = textOf(message);
+	if (text.length < options.minResultChars || text.startsWith(MARKER)) return undefined;
+	// Another extension already edited this result: recall returns the raw entry, so whatever
+	// that edit added could not be recovered after distillation. Leave it alone.
+	const raw = entry.sourceEntry.message;
+	if (raw && textOf(raw) !== text) return undefined;
+	return {
+		entryId: entry.sourceEntry.id,
+		toolName,
+		args: call?.args,
+		text,
+		...(message.isError ? { isError: true } : {}),
+		toolCallId: message.toolCallId,
+		turn: call?.turn,
+	};
+}
+
+/**
+ * The run starts after the last user message, with or without text. Steering messages sent
+ * during a run are user messages too, so they start a new span; tool results before them are
+ * left for later (they stay unpruned, which is the safe direction).
+ *
+ * `skip`: entry ids not to collect.
+ */
+export function collectRun(entries: readonly ProjectedEntryLike[], options: CollectOptions, skip?: ReadonlySet<string>): RunInfo | undefined {
+	const start = findRunStart(entries);
+	if (start < 0) return undefined;
+	const question = questionAt(entries, start);
+	const span = entries.slice(start + 1);
+	const { toolCalls, assistantTexts } = indexSpan(span);
+	const answer = assistantTexts.at(-1)?.text ?? "";
+	const notes = assistantTexts.slice(0, -1).map((t) => t.text).join("\n\n");
+
 	const candidates: Candidate[] = [];
 	let toolResults = 0;
 	for (const entry of span) {
-		const message = entry.messages[0];
-		if (entry.messages.length !== 1 || message?.role !== "toolResult") continue;
-		toolResults++;
-		if ((message.isError && !options.distillErrors) || !isTextOnly(message)) continue;
-		const call = message.toolCallId ? toolCalls.get(message.toolCallId) : undefined;
-		const toolName = message.toolName ?? call?.name ?? "tool";
-		if (exclude.has(toolName)) continue;
-		const text = textOf(message);
-		if (text.length < options.minResultChars || text.startsWith(MARKER)) continue;
-		// Another extension already edited this result: recall returns the raw entry, so whatever
-		// that edit added could not be recovered after distillation. Leave it alone.
-		const raw = entry.sourceEntry.message;
-		if (raw && textOf(raw) !== text) continue;
-		candidates.push({ entryId: entry.sourceEntry.id, toolName, args: call?.args, text, ...(message.isError ? { isError: true } : {}) });
+		if (entry.messages.length === 1 && entry.messages[0]?.role === "toolResult") toolResults++;
+		const candidate = candidateOf(entry, toolCalls, options);
+		if (!candidate || skip?.has(candidate.entryId)) continue;
+		const { toolCallId: _id, turn: _turn, ...plain } = candidate;
+		candidates.push(plain);
 	}
 	const history = collectHistory(entries.slice(0, start), options.historyExchanges);
 	return { question, answer, notes, candidates, toolResults, history };
@@ -125,7 +176,7 @@ export const hasHistory = (history: RunHistory | undefined): history is RunHisto
  * Tool calls and tool results are left out; every user message (steering included) starts a
  * new exchange, whose assistant part is the last assistant text before the next user message.
  */
-function collectHistory(before: readonly ProjectedEntryLike[], count: number): RunHistory {
+export function collectHistory(before: readonly ProjectedEntryLike[], count: number): RunHistory {
 	if (count <= 0) return { exchanges: [] };
 	let summary: string | undefined;
 	const all: { user: string; assistant: string; hasText: boolean }[] = [];

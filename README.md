@@ -33,8 +33,9 @@ pi install npm:pi-context-guard-jev     # needs an OpenRouter key: OPENROUTER_AP
   noise. Jev sees the question, the final answer and the earlier conversation, and decides chunk by chunk,
   so lines the ongoing task needs survive even when this run's question was about something else. A
   failed command the agent already got past is removed outright.
-- **Cheap and quick.** $0.0004–0.003 and 0.6–1 s per qualifying run (measured). It runs once, after the
-  run has finished, never while the agent works.
+- **Cheap and quick.** $0.0004–0.003 and 0.6–1 s per qualifying run (measured). It distills when a run
+  finishes, and during long runs at checkpoints, only once old outputs have piled up and removing them is
+  worth breaking the prompt cache ([Long autonomous runs](#long-autonomous-runs)).
 - **Claude and OpenAI, cache-aware.** Tested with Claude Sonnet 5.5 and GPT-6 Luna. On Anthropic it adds a
   cache breakpoint at the previous question, so the request after an edit still reads the conversation
   up to there from cache.
@@ -70,8 +71,75 @@ pi install npm:pi-context-guard-jev     # needs an OpenRouter key: OPENROUTER_AP
    `recall` the full output. If the kept part would still be more than 60% of the original, the result is
    left as it is.
 
+During long runs, **mid-run checkpoints** do the same for older outputs before the run ends (next
+section).
+
 Errors, timeouts and unclear answers always mean *keep*. For the full algorithm, see
 [docs/DESIGN.md](docs/DESIGN.md).
+
+## Long autonomous runs
+
+Run-end distillation helps the *next* prompt. A 30–120 minute autonomous run (the main agent or a long
+worker) would still carry every tool output until it ends, and Pi compacts only near the window
+minus 16k tokens. So, while a run is going, the extension also checkpoints:
+
+1. **At a turn boundary** (`turn_end`; Pi applies the edit to the very next request, before its compaction
+   check), outputs of the current run that are at least `midRunMinAgeTurns` (4) turns old and not judged
+   before are eligible. The final turn of a run is left to run-end distillation.
+2. **In batches:** a checkpoint runs only when the eligible outputs add up to `midRunBatchChars` (60,000)
+   characters, so edits, and the cache rewrites they cause, are rare.
+3. **Only when it pays:** an edit makes the next request rewrite the prompt cache once (OpenAI Codex: the
+   whole context; Anthropic: everything after the latest cache entry it can still read, at worst after the
+   question). The break-even rule
+   (`midRunBreakEven`) skips a checkpoint unless the expected saving over the rest of the run covers that.
+4. **Jev gets a checkpoint question:** no final answer exists yet, so it sees the task, the agent's latest
+   notes, the tool calls made since this output, and whether the output was superseded (the file was
+   edited afterwards, or the same command ran again). It answers whether the agent will still need each
+   chunk to finish. Each output is judged mid-run at most once; run-end distillation judges the rest,
+   including outputs kept at a checkpoint, with the final answer.
+5. **On Anthropic** the previous question stays pinned, and the first request after a checkpoint also gets
+   a breakpoint at the latest cache entry this process wrote before the first edited output, so the
+   unchanged part of the run is still read from cache.
+
+**Measured** (Pi 1.0.3, e2e scenario `long`: "fix all failing tests" in a generated project with 10 bugs,
+the full suite after every fix; single runs, not a benchmark; costs are what Pi reports at list price):
+
+| Main model | Configuration | Requests | Peak context | Main-model cost | Checkpoints (Jev) | Suite green |
+|---|---|---|---|---|---|---|
+| GPT-6 Luna | guard off | 32 / 37 | 68.4k / 87.7k | $0.020 / $0.030 | – | yes / yes |
+| GPT-6 Luna | `midRun: false` (run end only) | 26 | 86.3k | $0.022 | – (run end $0.006) | yes |
+| GPT-6 Luna | default | 31 | 72.4k | $0.024 | 1 at request 19, 1.0 s, removed 154k chars ($0.007 with run end) | yes |
+| Claude Sonnet 5.5 | guard off | 14 | 89.8k | $0.41 | – | yes |
+| Claude Sonnet 5.5 | default | 8 | 65.7k | $0.24 | none: too short to pay off (run end $0.003) | yes |
+| Claude Sonnet 5.5 | forced: `midRunBreakEven: false`, `midRunMinAgeTurns: 2`, `midRunBatchChars: 20000` | 12 | 43.3k | $0.34 | 3 ($0.0032 with run end) | yes |
+
+Context per request (every 5th request), GPT-6 Luna:
+
+| Request | 1 | 6 | 11 | 16 | 21 | 26 | 31 | 36 |
+|---|---|---|---|---|---|---|---|---|
+| guard off (37 requests) | 3.0k | 14.6k | 29.3k | 41.4k | 52.1k | 62.5k | 73.3k | 83.4k |
+| default (31 requests) | 3.2k | 27.9k | 35.2k | 62.7k | 28.6k | 34.2k | 43.7k | – |
+
+At the checkpoint, Jev removed 154k characters (five superseded test logs and an old search, for example
+30,150 → 1,834); the next request carried 28.5k instead of 72.4k tokens. No run needed `recall`.
+
+**Trade-offs:**
+- **OpenAI Codex reads nothing from cache after any edit** (2,560 or 0 tokens on the next request, after
+  every checkpoint measured, wherever the edit was). Each checkpoint re-sends the context uncached once and
+  pays back after about 8–10 later requests. In these 26–37-request runs the main-model cost came out
+  about the same with and without checkpoints, plus about $0.005 of Jev per run; the gain is a smaller
+  context.
+- **On Anthropic a checkpoint rewrites the cache after the latest entry the next request can read** (at worst after the question; writing costs 12.5× the read price).
+  In the forced run, the requests after the three checkpoints read 5.8k / 16.7k / 16.7k tokens and wrote
+  10.9k / 22.8k / 20.0k. After the first checkpoint of a run only the system prompt and question can be
+  read, because the run's first output is usually the first one edited. Claude solved the task in 8–14
+  requests, too few for a checkpoint to pay off, so with the default break-even rule it never
+  checkpointed; forced checkpoints in such short runs cost more than they saved. Checkpoints are meant
+  for runs that go on for dozens of requests.
+- **Latency mid-run:** a checkpoint pauses the run for the Jev requests (0.5–2.2 s measured, at most
+  `timeoutMs`).
+- Details: [docs/CACHE.md](docs/CACHE.md#mid-run-checkpoints), [docs/DESIGN.md](docs/DESIGN.md#mid-run-checkpoints),
+  wording probe in [docs/JEV.md](docs/JEV.md#checkpoint-wording).
 
 ## Install
 
@@ -119,7 +187,7 @@ sessions. See OpenRouter's data policy:
 | Text | Meaning |
 |---|---|
 | `🛡 0 saved` | On and ready; nothing is distilled on this branch yet |
-| `🛡 distilling…` | Jev is judging the outputs of the run that just finished |
+| `🛡 distilling…` | Jev is judging the outputs of the run that just finished, or of a mid-run checkpoint |
 | `🛡 −4.2k · 1` | ≈ tokens kept out of context · distilled results: about 4.2k tokens are currently kept out of context, by 1 distilled tool result |
 | `🛡 guard off` | Turned off with `/guard off` or `"enabled": false` |
 | `🛡 no openrouter key` | No credential for the classifier's provider (the provider name is filled in) |
@@ -134,7 +202,7 @@ removes distilled results. It is not a measured token count and not a cumulative
 
 | Command | Effect |
 |---|---|
-| `/guard` or `/guard status` | Shows whether the guard is on, the model, the savings on this branch, Jev runs, requests and cost, and the last run's result for each tool output, including Jev traces such as `kw.15 focus=chunk_4:.52 keep 9/29` |
+| `/guard` or `/guard status` | Shows whether the guard is on, the model, the savings on this branch, Jev runs and mid-run checkpoints, requests and cost, whether checkpoints are on, and the last run's or checkpoint's result for each tool output, including Jev traces such as `kw.15 focus=chunk_4:.52 keep 9/29` |
 | `/guard on` / `/guard off` | Turns the guard on or off and saves `enabled` to the settings file |
 | `/guard reload` | Re-reads the settings file and shows any warnings again |
 
@@ -179,7 +247,13 @@ fall back to the default.
 | `excludeTools` | `["edit", "write"]` | Tools whose results are never distilled |
 | `distillErrors` | `true` | Also distill error results, such as the log of a failing test or build; Jev is told the call failed, and that its details are usually no longer needed once the agent got past it |
 | `historyExchanges` | `3` | Earlier exchanges (prompt + last assistant text) sent to Jev so it judges relevance against the ongoing work; `0` sends no earlier conversation at all (integer 0–10) |
-| `pinAnthropicCache` | `true` | Add an Anthropic cache breakpoint at the previous user question ([docs/CACHE.md](docs/CACHE.md)) |
+| `pinAnthropicCache` | `true` | Anthropic cache breakpoints: at the previous user question on every request, and on the first request after context edits a read point (at a cache entry this process wrote) and a write anchor ([docs/CACHE.md](docs/CACHE.md)) |
+| `midRun` | `true` | Mid-run checkpoints during long runs ([Long autonomous runs](#long-autonomous-runs)) |
+| `midRunMinAgeTurns` | `4` | Judge an output mid-run only once it is at least this many turns old (integer 1–100) |
+| `midRunBatchChars` | `60000` | Run a checkpoint only when the not-yet-judged eligible outputs add up to this many characters |
+| `midRunBatchCharsOpenAI` | `60000` | The same, for `openai-codex` models |
+| `midRunChunkKeepThreshold` | `0.6` | Keep a chunk at a checkpoint if P(still needed) is at least this (probe in docs/JEV.md) |
+| `midRunBreakEven` | `true` | Skip a checkpoint unless its one-time prompt-cache rewrite is likely to pay off; `false` checkpoints purely for context room |
 
 Example:
 
@@ -197,7 +271,7 @@ Example:
 - aborted or failed runs
 - results that are already distilled, or that another extension already edited
 - single lines too long for one Jev request (kept as they are)
-- earlier runs: only the run that just finished is edited
+- earlier runs: only the current run is edited (mid-run checkpoints edit its older outputs, once each)
 
 ## Limitations
 
@@ -205,7 +279,7 @@ Example:
   conversation (the ongoing task), so a follow-up that goes somewhere new may need something that was
   removed. The header and omission lines say what is missing, and `recall` returns it.
 - **Latency.** Settling waits for Jev. This adds about 0.5–1.2 s after each qualifying run (measured), and
-  never more than `timeoutMs` (8 s).
+  never more than `timeoutMs` (8 s). A mid-run checkpoint pauses the run the same way.
 - **Cost.** Each qualifying run costs a few Jev requests, measured at under $0.001 per run. The first prompt
   after an edit also has a one-time partial prompt-cache miss ([docs/CACHE.md](docs/CACHE.md)).
 - **Steering.** A message sent during a run starts a new span. Tool results from before it are never
@@ -241,8 +315,7 @@ carried **9.2k tokens instead of 35.3k**.
 the unit tests (a 15.8k-character log, 3 failures among 116 tests) and reported the cause. Jev kept the
 3 failures with their assertion messages and the failing-test summary, and dropped the passing tests:
 15.8k → 8.6k chars. Turn 2 ("now fix it") carried **5.7k tokens instead of 7.5k**, and both runs fixed
-the bug. (In the first run of this example, failing commands were never distilled; `distillErrors` was
-added because of it.)
+the bug. Failing commands are distilled because `distillErrors` is on by default.
 
 What the model sees after distilling (example A, Claude; the first lines of the real replacement):
 
@@ -274,13 +347,14 @@ dist/core/compaction/compaction.d.ts:59:export declare function shouldCompact(co
   tokens instead of 13,824: a partial miss).
   At the per-token prices in these runs, the smaller context earns that back after about 7 more requests
   (Claude, A), about 3 (GPT, A) or about 1 (GPT, C). Before that, the benefit is a smaller context window,
-  not a lower bill. Anthropic requests also get a cache breakpoint at the previous question, which raised
-  the first request's cache read from 1,693 to 5,810 tokens in a long run ([docs/CACHE.md](docs/CACHE.md)).
+  not a lower bill. Anthropic requests also get a cache breakpoint at the previous question; in a run with
+  11 sequential tool calls it raised the first request's cache read from 1,693 to 5,810 tokens compared
+  with `pinAnthropicCache: false` ([docs/CACHE.md](docs/CACHE.md)).
 - **Small or fully needed outputs are left whole.** In A, GPT's 9k-character read of `agent-session.js` was
   `not-worth` (too much of it was needed) and a 6k narrowed search was judged needed whole.
 
-Earlier numbers on the generated StatusBadge test repo (96% removed, `recall` of a removed line) are in
-[docs/TESTING.md](docs/TESTING.md#results-so-far-pi-103).
+Numbers on the generated StatusBadge test repo (96% removed, `recall` of a removed line) are in
+[docs/TESTING.md](docs/TESTING.md#results-pi-103).
 
 ## Documentation
 

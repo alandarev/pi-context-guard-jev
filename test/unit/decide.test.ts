@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Chunk } from "../../src/chunk.ts";
-import { buildRequest, chunkLabel, citedFiles, interpret } from "../../src/decide.ts";
+import { buildCheckpointRequest, buildRequest, chunkLabel, citedFiles, interpret } from "../../src/decide.ts";
 import type { Candidate } from "../../src/run.ts";
 import type { ClassifierAnswer, ClassifierResponse } from "../../src/types.ts";
 
@@ -245,4 +245,61 @@ test("citedFiles ignores substrings of other names", () => {
 	// Basenames shorter than 4 characters only match as paths.
 	assert.deepEqual(citedFiles("x.c is short", [chunk(0, ["src/x.c"])]), new Set());
 	assert.deepEqual(citedFiles("in src/x.c", [chunk(0, ["src/x.c"])]), new Set([0]));
+});
+
+test("buildCheckpointRequest: state order and checkpoint wording", () => {
+	const info = {
+		question: "Fix the failing tests",
+		history: { exchanges: [{ user: "hi", assistant: "hello" }] },
+		latest: "Now fixing the CSV parser.",
+		notes: "Ran the suite.\n\nFixed the calendar.",
+	};
+	const cpCandidate = {
+		...candidate,
+		isError: true,
+		turn: 0,
+		laterCalls: ["edit src/a.ts", "bash `npm test`"],
+		superseded: "the same command ran again later (3 turns later)",
+	};
+	const request = buildCheckpointRequest(info, cpCandidate, segment, 0, 1, 30);
+	assert.deepEqual(Object.keys(request.state), [
+		"situation",
+		"earlier_conversation",
+		"user_question",
+		"agent_progress",
+		"later_tool_calls",
+		"superseded",
+		"tool",
+		"tool_status",
+		"tool_arguments",
+		"output_size",
+		"chunks",
+	]);
+	assert.match(request.state.situation as string, /still working on user_question; it has not finished yet/);
+	assert.deepEqual(request.state.agent_progress, { latest_note: "Now fixing the CSV parser.", earlier_notes: "Ran the suite.\n\nFixed the calendar." });
+	assert.deepEqual(request.state.later_tool_calls, ["edit src/a.ts", "bash `npm test`"]);
+	assert.equal("final_answer" in request.state, false);
+	assert.deepEqual(Object.keys(request.questions), ["keep_whole", "focus", "chunk_1", "chunk_2", "chunk_3"]);
+	assert.match(request.questions.keep_whole.instructions, /^To finish user_question, will the agent still need all of the tool output/);
+	assert.match(request.questions.chunk_2.instructions, /^To finish user_question, will the agent still need the lines in chunk_2\?/);
+	const focusQuestion = request.questions.focus;
+	assert.ok(focusQuestion.type === "choice");
+	assert.deepEqual(Object.keys(focusQuestion.criteria), ["whole", "none", "chunk_1", "chunk_2", "chunk_3"]);
+	assert.equal(focusQuestion.criteria.none, "Nothing in the tool output will be needed again");
+});
+
+test("buildCheckpointRequest: minimal state", () => {
+	const request = buildCheckpointRequest(
+		{ question: "q", history: { exchanges: [] }, latest: "", notes: "" },
+		{ ...candidate, args: undefined, turn: 0, laterCalls: [] },
+		segment.slice(0, 1),
+		1,
+		2,
+		10,
+	);
+	assert.deepEqual(Object.keys(request.state), ["situation", "user_question", "later_tool_calls", "tool", "output_size", "chunks"]);
+	assert.equal(request.state.later_tool_calls, "none yet");
+	assert.equal(request.state.output_size, "10 lines; this is part 2 of 2");
+	assert.match(request.questions.keep_whole.instructions, /this part of the tool output/);
+	assert.doesNotMatch(request.state.situation as string, /earlier_conversation/);
 });

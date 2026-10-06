@@ -46,8 +46,23 @@ export interface GuardConfig {
 	 * against the ongoing work too. 0 sends no earlier conversation at all (no summary either).
 	 */
 	historyExchanges: number;
-	/** Add an Anthropic cache breakpoint at the previous user question (see docs/CACHE.md). */
+	/**
+	 * Add Anthropic cache breakpoints: at the previous user question, and after context edits at a
+	 * read point before the first edited output (see docs/CACHE.md).
+	 */
 	pinAnthropicCache: boolean;
+	/** Mid-run checkpoints: judge older tool outputs while a long run is still going. */
+	midRun: boolean;
+	/** A tool output is judged mid-run only once its turn is at least this many turns old. */
+	midRunMinAgeTurns: number;
+	/** Run a checkpoint only when the not-yet-judged eligible outputs total at least this (characters). */
+	midRunBatchChars: number;
+	/** Batch size for OpenAI Codex models, whose first request after an edit reads (almost) nothing from cache. */
+	midRunBatchCharsOpenAI: number;
+	/** Keep a chunk at a checkpoint when P(still needed) reaches this. */
+	midRunChunkKeepThreshold: number;
+	/** Skip a checkpoint unless its one-time prompt-cache rewrite is likely to pay off (docs/CACHE.md). */
+	midRunBreakEven: boolean;
 }
 
 export const DEFAULT_CONFIG: GuardConfig = {
@@ -69,6 +84,12 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	distillErrors: true,
 	historyExchanges: 3,
 	pinAnthropicCache: true,
+	midRun: true,
+	midRunMinAgeTurns: 4,
+	midRunBatchChars: 60_000,
+	midRunBatchCharsOpenAI: 60_000,
+	midRunChunkKeepThreshold: 0.6,
+	midRunBreakEven: true,
 };
 
 const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
@@ -84,9 +105,13 @@ const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
 	maxSegmentChars: [2_000, 200_000],
 	maxChunksPerSegment: [2, 60],
 	historyExchanges: [0, 10],
+	midRunMinAgeTurns: [1, 100],
+	midRunBatchChars: [0, 10_000_000],
+	midRunBatchCharsOpenAI: [0, 10_000_000],
+	midRunChunkKeepThreshold: [0, 1],
 };
 
-const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges"]);
+const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges", "midRunMinAgeTurns", "midRunBatchChars", "midRunBatchCharsOpenAI"]);
 
 /** Merge untrusted JSON over the defaults, keeping only well-typed, in-range values. */
 export function normalizeConfig(raw: unknown): GuardConfig {

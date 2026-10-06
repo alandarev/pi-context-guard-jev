@@ -124,3 +124,23 @@ test("loadConfig / saveConfigPatch round trip in a temp dir", () => {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("mid-run settings: defaults and validation", () => {
+	assert.equal(DEFAULT_CONFIG.midRun, true);
+	assert.equal(DEFAULT_CONFIG.midRunMinAgeTurns, 4);
+	assert.equal(DEFAULT_CONFIG.midRunBatchChars, 60_000);
+	assert.equal(DEFAULT_CONFIG.midRunChunkKeepThreshold, 0.6);
+	assert.equal(DEFAULT_CONFIG.midRunBreakEven, true);
+	assert.equal(normalizeConfig({ midRunBreakEven: false }).midRunBreakEven, false);
+	const ok = normalizeConfig({ midRun: false, midRunMinAgeTurns: 1, midRunBatchChars: 0, midRunBatchCharsOpenAI: 250_000, midRunChunkKeepThreshold: 0.45 });
+	assert.deepEqual(
+		[ok.midRun, ok.midRunMinAgeTurns, ok.midRunBatchChars, ok.midRunBatchCharsOpenAI, ok.midRunChunkKeepThreshold],
+		[false, 1, 0, 250_000, 0.45],
+	);
+	const bad = normalizeConfig({ midRun: "no", midRunMinAgeTurns: 0, midRunBatchChars: 1.5, midRunBatchCharsOpenAI: -1, midRunChunkKeepThreshold: 2 });
+	assert.deepEqual(
+		[bad.midRun, bad.midRunMinAgeTurns, bad.midRunBatchChars, bad.midRunBatchCharsOpenAI, bad.midRunChunkKeepThreshold],
+		[DEFAULT_CONFIG.midRun, 4, 60_000, DEFAULT_CONFIG.midRunBatchCharsOpenAI, 0.6],
+	);
+	assert.equal(normalizeConfig({ midRunMinAgeTurns: 2.5 }).midRunMinAgeTurns, 4);
+});
