@@ -56,13 +56,13 @@ test("formatStatus for each state", () => {
 	assert.equal(formatStatus(empty, "problem", identity, "no openrouter key"), "🛡 no openrouter key");
 	assert.equal(formatStatus(empty, "problem", identity), "🛡 guard unavailable");
 	assert.equal(formatStatus(empty, "ready", identity), "🛡 0 saved");
-	assert.equal(formatStatus({ ...empty, savedTokens: 12_345, distilledResults: 3 }, "ready", identity), "🛡 −12.3k tok · 3 distilled");
+	assert.equal(formatStatus({ ...empty, savedTokens: 12_345, distilledResults: 3 }, "ready", identity), "🛡 −12.3k · 3");
 });
 
 test("formatStatus colours each part", () => {
 	const tagged: Colorize = (color, text) => `<${color}>${text}`;
 	assert.equal(formatStatus(empty, "problem", tagged, "x"), "<warning>🛡 x");
-	assert.equal(formatStatus({ ...empty, savedTokens: 10, distilledResults: 1 }, "ready", tagged), "<success>🛡 −10 tok<dim> · 1 distilled");
+	assert.equal(formatStatus({ ...empty, savedTokens: 10, distilledResults: 1 }, "ready", tagged), "<success>🛡 −10<dim> · 1");
 });
 
 test("formatCost", () => {

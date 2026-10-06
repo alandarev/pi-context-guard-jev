@@ -39,6 +39,11 @@ export interface GuardConfig {
 	maxChunksPerSegment: number;
 	/** Tool names whose results are never distilled. */
 	excludeTools: string[];
+	/**
+	 * Earlier exchanges (user prompt + final assistant text) shown to Jev, so it judges relevance
+	 * against the ongoing work too. 0 sends no earlier conversation at all (no summary either).
+	 */
+	historyExchanges: number;
 	/** Add an Anthropic cache breakpoint at the previous user question (see docs/CACHE.md). */
 	pinAnthropicCache: boolean;
 }
@@ -56,9 +61,10 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	keepCitedFiles: false,
 	timeoutMs: 8_000,
 	concurrency: 6,
-	maxSegmentChars: 40_000,
+	maxSegmentChars: 32_000,
 	maxChunksPerSegment: 40,
 	excludeTools: ["edit", "write"],
+	historyExchanges: 3,
 	pinAnthropicCache: true,
 };
 
@@ -74,9 +80,10 @@ const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
 	concurrency: [1, 32],
 	maxSegmentChars: [2_000, 200_000],
 	maxChunksPerSegment: [2, 60],
+	historyExchanges: [0, 10],
 };
 
-const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment"]);
+const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges"]);
 
 /** Merge untrusted JSON over the defaults, keeping only well-typed, in-range values. */
 export function normalizeConfig(raw: unknown): GuardConfig {

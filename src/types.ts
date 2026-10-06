@@ -10,7 +10,9 @@ export type Block = { type: string; text?: string; [key: string]: unknown };
 
 export interface MessageLike {
 	role: string;
+	/** Absent on Pi's `compactionSummary` / `branchSummary` messages, which carry `summary`. */
 	content: string | Block[];
+	summary?: string;
 	toolName?: string;
 	toolCallId?: string;
 	isError?: boolean;
@@ -78,3 +80,10 @@ export const textOf = (message: MessageLike): string =>
 
 export const isTextOnly = (message: MessageLike): boolean =>
 	typeof message.content === "string" || message.content.every((block) => block.type === "text");
+
+/** Shorten `text` to about `max` characters, keeping its head (70%) and tail. */
+export function clip(text: string, max: number): string {
+	if (text.length <= max) return text;
+	const head = Math.floor(max * 0.7);
+	return `${text.slice(0, head)}\n[…]\n${text.slice(text.length - (max - head))}`;
+}

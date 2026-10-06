@@ -47,6 +47,14 @@ test("normalizeConfig rejects non-integer counts and sizes", () => {
 	assert.equal(normalizeConfig({ concurrency: 2.0 }).concurrency, 2);
 });
 
+test("historyExchanges: integer 0–10, default 3", () => {
+	assert.equal(DEFAULT_CONFIG.historyExchanges, 3);
+	assert.equal(DEFAULT_CONFIG.maxSegmentChars, 32_000);
+	assert.equal(normalizeConfig({ historyExchanges: 0 }).historyExchanges, 0);
+	assert.equal(normalizeConfig({ historyExchanges: 10 }).historyExchanges, 10);
+	for (const bad of [-1, 11, 2.5, "3", null]) assert.equal(normalizeConfig({ historyExchanges: bad }).historyExchanges, 3, String(bad));
+});
+
 test("normalizeConfig keeps valid values", () => {
 	const config = normalizeConfig({
 		enabled: false,

@@ -55,6 +55,17 @@ SCENARIOS.long = [
 		"Finish with the list of StatusBadge usages and a one-line summary of what each opened file renders.",
 	"Which of those files did you find hardest to understand? One sentence.",
 ];
+// Earlier conversation matters (historyExchanges): turn 1 sets up a goal (API retry behaviour), turn 2
+// asks an unrelated-looking question whose broad search also prints the src/api retry lines, turn 3
+// needs those lines. With history Jev can see that they matter for the ongoing work.
+SCENARIOS.history = [
+	"Context for this session: I'm about to migrate every API client in src/api to a shared retry helper, so I care about " +
+		"how each client retries. Don't change anything and don't search yet; just acknowledge in one sentence.",
+	"Which parts of this codebase use the StatusBadge UI component? Start with one broad case-insensitive search " +
+		"(rg -n -i status), then narrow down as needed. Answer with file:line references.",
+	"Without running any new search or reading files, which API clients retry on HTTP 429 according to what you have " +
+		"already seen? If it's not in your context, use recall.",
+];
 const PROMPTS = SCENARIOS[scenario];
 if (!PROMPTS) {
 	console.error(`unknown scenario ${scenario}`);
@@ -136,7 +147,7 @@ turnEntries.forEach((list, i) => {
 		usage,
 		firstRequest: requests[0] && { bytes: requests[0].bytes, markers: requests[0].markers, breakpoints: requests[0].breakpoints },
 		maxBreakpoints: Math.max(0, ...requests.map((r) => r.breakpoints.length)),
-		edits: edits.map((e) => ({ targetId: e.targetId, chars: textOf(e.replacement ?? { content: [] }).length })),
+		edits: edits.map((e) => ({ targetId: e.targetId, chars: textOf(e.replacement ?? { content: [] }).length, text: textOf(e.replacement ?? { content: [] }) })),
 		guard: records.map((r) => ({ savedChars: r.savedChars, requests: r.requests, ms: r.ms, costUsd: r.costUsd, timedOut: r.timedOut, results: r.results.map((x) => `${x.outcome} ${x.beforeChars}->${x.afterChars} ${x.reason} ${x.label}${x.jev ? `\n      jev: ${x.jev.join(" | ")}` : ""}`) })),
 	});
 });
@@ -182,6 +193,37 @@ if (scenario === "long" && t1 && withGuard) {
 	check("long: turn 1 made 10+ tool calls", t1.toolCalls.length >= 10, t1.toolCalls.length);
 	check("long: turn 1 had 10+ model requests (sequential calls)", t1.usage.length >= 10, t1.usage.length);
 }
+if (scenario === "history" && t2) {
+	// Which clients really retry on 429 (the fixture is deterministic, but read it to be sure).
+	const apiDir = join(repo, "src/api");
+	const clients = readdirSync(apiDir).map((f) => f.replace(/\.ts$/, ""));
+	const retry429 = clients.filter((c) => readFileSync(join(apiDir, `${c}.ts`), "utf8").includes("=== 429"));
+	const editText = t2.edits.map((e) => e.text).join("\n");
+	const retryLines = editText.split("\n").filter((l) => /^src\/api\/\w+\.ts[:-]\d+[:-].*retry/.test(l));
+	summary.history = {
+		historyExchanges: guardConfig ? JSON.parse(guardConfig).historyExchanges : undefined,
+		turn2Edits: t2.edits.length,
+		keptApiRetryLines: retryLines.length,
+		kept429Lines: retryLines.filter((l) => l.includes("429")).length,
+		turn2Results: t2.guard.flatMap((g) => g.results),
+		turn2JevMs: t2.guard.map((g) => g.ms),
+		turn3UsedRecall: t3?.usedRecall,
+		turn3ToolCalls: t3?.toolCalls,
+		expected429: retry429,
+	};
+	if (withGuard) check("history: turn 2 produced context edits", t2.edits.length > 0, t2.edits.length);
+	if (t3) {
+		const answer = t3.answer.toLowerCase();
+		const named = clients.filter((c) => answer.includes(c.toLowerCase()));
+		// A client named only to say it does NOT retry on 429 is fine.
+		const negated = (c) => answer.split("\n").filter((l) => l.includes(c.toLowerCase())).every((l) => /\b(not|no|none|doesn't|does not|without|only lists)\b/.test(l));
+		const claimed = named.filter((c) => !negated(c) || retry429.includes(c));
+		const correct = retry429.every((c) => named.includes(c)) && claimed.every((c) => retry429.includes(c));
+		summary.history.turn3Named = named;
+		summary.history.turn3Correct = correct;
+		check("history: turn 3 names exactly the clients that retry on 429", correct, { expected: retry429, named });
+	}
+}
 if (model.startsWith("anthropic/")) {
 	check("anthropic requests stay within 4 breakpoints", summary.turns.every((t) => t.maxBreakpoints <= 4), summary.turns.map((t) => t.maxBreakpoints));
 }
@@ -196,6 +238,7 @@ for (const [i, t] of summary.turns.entries()) {
 	for (const g of t.guard) console.log(`guard: saved ${g.savedChars} chars in ${g.ms} ms, ${g.requests} Jev req, $${g.costUsd.toFixed(5)}${g.timedOut ? " TIMEOUT" : ""}\n  ${g.results.join("\n  ")}`);
 	console.log(`answer: ${t.answer.slice(0, 400).replace(/\n/g, " ⏎ ")}`);
 }
+if (summary.history) console.log(`\nhistory: ${JSON.stringify(summary.history, null, 1)}`);
 console.log("\nchecks:");
 for (const c of checks) console.log(`  ${c.ok ? "PASS" : "FAIL"} ${c.name}${c.ok ? "" : ` → ${JSON.stringify(c.detail)}`}`);
 console.log(`\nartifacts: ${out}`);

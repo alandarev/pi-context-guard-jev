@@ -17,8 +17,10 @@ that was searched. The raw output stays in the session file, and the model can f
    skipped if the candidates add up to less than 8,000 characters.
 3. **It chunks each output.** grep-style output is grouped by file. Other output is cut into windows of
    roughly 0.8–4k characters, with breaks at blank lines where possible.
-4. **It sends one Jev request per segment** (up to 40,000 characters and 40 chunks). Each request asks three
-   kinds of question about the user's question and the final answer:
+4. **It sends one Jev request per segment** (up to 32,000 characters and 40 chunks). Each request asks three
+   kinds of question about the user's question and the final answer, and, when there is one, the earlier
+   conversation of the session (so output that the ongoing work still needs is kept even if this run's
+   question was about something else):
    - `keep_whole`: is all of this output still needed?
    - `focus`: does the answer use most of it, none of it, or a few chunks (and if so, which one matters most)?
    - one yes/no question per chunk: is this chunk needed?
@@ -57,6 +59,10 @@ each Jev request sends the following to OpenRouter, which forwards it to TypeSaf
 - the user's question (up to 4,000 characters),
 - the final answer (up to 6,000 characters),
 - the assistant's notes written during the run (up to 2,000 characters),
+- excerpts of the earlier conversation in this session: the latest compaction or branch summary (up to
+  2,000 characters), the first prompt (up to 1,000), and the last 3 earlier exchanges, each one prompt (up to
+  800) and the last assistant text after it (up to 1,200). Tool calls and tool outputs of earlier runs are not
+  included. Set `historyExchanges` to `0` to send none of it,
 - the tool name and arguments,
 - the full text of the large tool output being judged. This can include source code, logs or anything else
   the tools returned.
@@ -73,7 +79,7 @@ sessions. See OpenRouter's data policy:
 |---|---|
 | `🛡 0 saved` | On and ready; nothing is distilled on this branch yet |
 | `🛡 distilling…` | Jev is judging the outputs of the run that just finished |
-| `🛡 −4.2k tok · 1 distilled` | About 4.2k tokens are currently kept out of context, by 1 distilled tool result |
+| `🛡 −4.2k · 1` | ≈ tokens kept out of context · distilled results: about 4.2k tokens are currently kept out of context, by 1 distilled tool result |
 | `🛡 guard off` | Turned off with `/guard off` or `"enabled": false` |
 | `🛡 no openrouter key` | No credential for the classifier's provider (the provider name is filled in) |
 | `🛡 Jev model not found` | The configured `model` is not in Pi's classifier catalog |
@@ -127,9 +133,10 @@ fall back to the default.
 | `keepCitedFiles` | `false` | Also keep grep chunks for files that the final answer names (see DESIGN.md for why it is off) |
 | `timeoutMs` | `8000` | Total time budget for all Jev requests of one run; unfinished parts are kept |
 | `concurrency` | `6` | Jev requests in parallel |
-| `maxSegmentChars` | `40000` | Most characters of one output per Jev request |
+| `maxSegmentChars` | `32000` | Most characters of one output per Jev request (keeps the worst-case request under Jev's 32k-token context, see docs/JEV.md) |
 | `maxChunksPerSegment` | `40` | Most chunks per Jev request |
 | `excludeTools` | `["edit", "write"]` | Tools whose results are never distilled |
+| `historyExchanges` | `3` | Earlier exchanges (prompt + last assistant text) sent to Jev so it judges relevance against the ongoing work; `0` sends no earlier conversation at all (integer 0–10) |
 | `pinAnthropicCache` | `true` | Add an Anthropic cache breakpoint at the previous user question ([docs/CACHE.md](docs/CACHE.md)) |
 
 Example:
@@ -170,7 +177,8 @@ Pi 1.0.3. A generated test repo; the prompt "which parts use the `StatusBadge` c
 | GPT-6 Luna (openai-codex) | 1,501 chars (96% removed) | 2 requests, 550 ms, $0.00083 | Turn 2 answered from the distilled context; turn 3 used `recall` and quoted a removed line exactly |
 | Claude Sonnet 5.5 | 3,066 chars | 2 requests, 1.18 s, $0.00084 | Turn 2 read 5,777 tokens from cache; turn 3 used `recall` |
 
-- In the interactive TUI, Pi's own context meter dropped from 33k to 17k after one distilled run.
+- In the interactive TUI, Pi's own context meter dropped from 33k to 17k after one distilled run, and the footer
+  showed `🛡 −4.2k · 1` (≈ tokens kept out of context · distilled results).
 - In a long Claude run (11 sequential tool calls), the question breakpoint raised the first request's cache
   read from 1,693 to 5,810 tokens and lowered its cache write from 13,068 to 8,913.
 - With OpenAI, the first request after an edit read 2,560 tokens from cache instead of 13,824

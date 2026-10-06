@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MARKER } from "../../src/render.ts";
-import { collectRun, NO_TEXT_QUESTION } from "../../src/run.ts";
+import {
+	collectRun,
+	HISTORY_ASSISTANT_LIMIT,
+	HISTORY_FIRST_REQUEST_LIMIT,
+	HISTORY_SUMMARY_LIMIT,
+	HISTORY_USER_LIMIT,
+	hasHistory,
+	NO_TEXT_QUESTION,
+} from "../../src/run.ts";
 import { assistant, entry, lines, toolResult, user } from "./fixtures.ts";
 
-const options = { minResultChars: 100, excludeTools: ["edit", "write"] };
+const options = { minResultChars: 100, excludeTools: ["edit", "write"], historyExchanges: 3 };
 const big = lines(10);
 
 test("collectRun returns undefined without a user message", () => {
@@ -161,4 +169,139 @@ test("collectRun ignores entries projected to several messages", () => {
 	assert.ok(run);
 	assert.equal(run.toolResults, 0);
 	assert.equal(run.candidates.length, 0);
+});
+
+// --- history -----------------------------------------------------------------------------------
+
+/** Pi's compaction/branch summary messages carry `summary`, not `content`. */
+const summaryEntry = (role: "compactionSummary" | "branchSummary", summary: string) =>
+	({ sourceEntry: { id: `s-${role}`, type: role === "compactionSummary" ? "compaction" : "branch_summary" }, messages: [{ role, summary } as never] });
+
+const currentRun = [
+	user("current question", "cur"),
+	assistant("", [{ id: "cx", name: "bash", arguments: {} }]),
+	toolResult("cx", "bash", big, "cur-r"),
+	assistant("current answer"),
+];
+
+test("history: last N exchanges, oldest first, tool traffic excluded", () => {
+	const entries = [
+		user("first request"),
+		assistant("ack 1"),
+		user("second"),
+		assistant("looking", [{ id: "c1", name: "bash", arguments: {} }]),
+		toolResult("c1", "bash", big),
+		assistant("second answer"),
+		user("third"),
+		assistant("third answer"),
+		user("fourth"),
+		assistant("", [{ id: "c2", name: "bash", arguments: {} }]),
+		toolResult("c2", "bash", big),
+		...currentRun,
+	];
+	const run = collectRun(entries, options);
+	assert.ok(run);
+	assert.deepEqual(run.history, {
+		firstRequest: "first request",
+		exchanges: [
+			{ user: "second", assistant: "second answer" },
+			{ user: "third", assistant: "third answer" },
+			{ user: "fourth", assistant: "" },
+		],
+	});
+	assert.equal(run.question, "current question");
+	assert.equal(run.answer, "current answer");
+	assert.equal(JSON.stringify(run.history).includes("line 1"), false, "no tool output in history");
+});
+
+test("history: firstRequest only when not already among the exchanges", () => {
+	const entries = [user("first request"), assistant("ok"), user("second"), assistant("ok 2"), ...currentRun];
+	const run = collectRun(entries, options);
+	assert.deepEqual(run?.history, {
+		exchanges: [
+			{ user: "first request", assistant: "ok" },
+			{ user: "second", assistant: "ok 2" },
+		],
+	});
+	// The first run of a session has no history at all.
+	const first = collectRun(currentRun, options);
+	assert.deepEqual(first?.history, { exchanges: [] });
+	assert.equal(hasHistory(first?.history), false);
+});
+
+test("history: latest compaction or branch summary before the run", () => {
+	const entries = [
+		summaryEntry("compactionSummary", "old compaction summary"),
+		user("after compaction"),
+		assistant("answer a"),
+		summaryEntry("branchSummary", "branch summary"),
+		user("on the branch"),
+		assistant("answer b"),
+		...currentRun,
+	];
+	const run = collectRun(entries, options);
+	assert.equal(run?.history?.summary, "branch summary");
+	assert.deepEqual(
+		run?.history?.exchanges.map((e) => e.user),
+		["after compaction", "on the branch"],
+	);
+	const onlyCompaction = collectRun([summaryEntry("compactionSummary", "the summary"), ...currentRun], options);
+	assert.deepEqual(onlyCompaction?.history, { summary: "the summary", exchanges: [] });
+	assert.equal(hasHistory(onlyCompaction?.history), true);
+});
+
+test("history: image-only prompts and steering messages", () => {
+	const entries = [
+		user("first request"),
+		assistant("ok"),
+		entry({ role: "user", content: [{ type: "image", data: "x" }] }),
+		assistant("I see a stack trace", [{ id: "c1", name: "bash", arguments: {} }]),
+		toolResult("c1", "bash", big),
+		// A steering message mid-run starts a new exchange.
+		user("focus on the parser"),
+		assistant("the parser fails on line 3"),
+		...currentRun,
+	];
+	const run = collectRun(entries, { ...options, historyExchanges: 2 });
+	assert.deepEqual(run?.history, {
+		firstRequest: "first request",
+		exchanges: [
+			{ user: NO_TEXT_QUESTION, assistant: "I see a stack trace" },
+			{ user: "focus on the parser", assistant: "the parser fails on line 3" },
+		],
+	});
+	// An image-only first prompt is not repeated as firstRequest.
+	const imageFirst = collectRun(
+		[entry({ role: "user", content: [{ type: "image", data: "x" }] }), assistant("a"), user("b"), assistant("c"), ...currentRun],
+		{ ...options, historyExchanges: 1 },
+	);
+	assert.deepEqual(imageFirst?.history, { exchanges: [{ user: "b", assistant: "c" }] });
+});
+
+test("history: every part is clipped", () => {
+	const entries = [
+		summaryEntry("compactionSummary", "S".repeat(10_000)),
+		user("F".repeat(10_000)),
+		assistant("x"),
+		user("U".repeat(10_000)),
+		assistant("first text"),
+		assistant("A".repeat(10_000)),
+		...currentRun,
+	];
+	const history = collectRun(entries, { ...options, historyExchanges: 1 })?.history;
+	assert.ok(history?.summary && history.firstRequest);
+	const within = (text: string, limit: number) => text.length <= limit + 5 && text.length >= limit && text.includes("\n[…]\n");
+	assert.ok(within(history.summary, HISTORY_SUMMARY_LIMIT), `${history.summary.length}`);
+	assert.ok(within(history.firstRequest, HISTORY_FIRST_REQUEST_LIMIT));
+	assert.ok(within(history.exchanges[0].user, HISTORY_USER_LIMIT));
+	assert.ok(within(history.exchanges[0].assistant, HISTORY_ASSISTANT_LIMIT));
+	assert.ok(history.exchanges[0].assistant.startsWith("AAA"), "the LAST assistant text of the exchange");
+});
+
+test("history: historyExchanges 0 sends nothing, not even the summary", () => {
+	const entries = [summaryEntry("compactionSummary", "summary"), user("first"), assistant("a"), user("second"), assistant("b"), ...currentRun];
+	const run = collectRun(entries, { ...options, historyExchanges: 0 });
+	assert.deepEqual(run?.history, { exchanges: [] });
+	assert.equal(hasHistory(run?.history), false);
+	assert.equal(run?.candidates.length, 1);
 });

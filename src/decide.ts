@@ -11,8 +11,8 @@
  * can only name the most important chunk; the per-chunk yes/no questions add the others.
  */
 import type { Chunk } from "./chunk.ts";
-import type { Candidate, RunInfo } from "./run.ts";
-import type { ClassifierQuestion, ClassifierRequest, ClassifierResponse } from "./types.ts";
+import { type Candidate, hasHistory, type RunHistory, type RunInfo } from "./run.ts";
+import { type ClassifierQuestion, type ClassifierRequest, type ClassifierResponse, clip } from "./types.ts";
 
 export interface DecideThresholds {
 	keepWholeThreshold: number;
@@ -32,33 +32,41 @@ const ARGS_LIMIT = 600;
 
 export const chunkLabel = (chunk: Chunk): string => `chunk_${chunk.index + 1}`;
 
-function clip(text: string, max: number): string {
-	if (text.length <= max) return text;
-	const head = Math.floor(max * 0.7);
-	return `${text.slice(0, head)}\n[…]\n${text.slice(text.length - (max - head))}`;
-}
-
 function describeArgs(args: Record<string, unknown> | undefined): string {
 	if (!args) return "";
 	const json = JSON.stringify(args);
 	return json.length > ARGS_LIMIT ? `${json.slice(0, ARGS_LIMIT)}…` : json;
 }
 
+/** `earlier_conversation` state value: only the parts that are present. */
+function describeHistory(history: RunHistory): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	if (history.summary) out.summary = history.summary;
+	if (history.firstRequest) out.first_request = history.firstRequest;
+	if (history.exchanges.length > 0) {
+		out.recent_exchanges = history.exchanges.map((exchange) => (exchange.assistant ? { user: exchange.user, assistant: exchange.assistant } : { user: exchange.user }));
+	}
+	return out;
+}
+
 export function buildRequest(
-	run: Pick<RunInfo, "question" | "answer" | "notes">,
+	run: Pick<RunInfo, "question" | "answer" | "notes" | "history">,
 	candidate: Candidate,
 	segment: readonly Chunk[],
 	segmentIndex: number,
 	segmentCount: number,
 	totalLines: number,
 ): ClassifierRequest {
+	const withHistory = hasHistory(run.history);
 	const state: Record<string, unknown> = {
 		situation:
 			"A coding agent answered user_question. To do so it called tools; this is the output of one call, split into chunks. " +
-			"From now on the agent will only see the chunks we keep, plus a note that the rest was removed and can be fetched again.",
-		user_question: clip(run.question, QUESTION_LIMIT),
-		final_answer: clip(run.answer, ANSWER_LIMIT),
+			"From now on the agent will only see the chunks we keep, plus a note that the rest was removed and can be fetched again." +
+			(withHistory ? " earlier_conversation shows the session so far: the agent is likely to continue that work." : ""),
 	};
+	if (hasHistory(run.history)) state.earlier_conversation = describeHistory(run.history);
+	state.user_question = clip(run.question, QUESTION_LIMIT);
+	state.final_answer = clip(run.answer, ANSWER_LIMIT);
 	if (run.notes.trim()) state.agent_notes_during_the_run = clip(run.notes, NOTES_LIMIT);
 	state.tool = candidate.toolName;
 	const args = describeArgs(candidate.args);
@@ -76,18 +84,22 @@ export function buildRequest(
 		focusCriteria[label] = `A few chunks are needed; ${label} is the most important of them`;
 	}
 
+	// Without history the wording is exactly the tuned single-run wording (docs/JEV.md).
+	const followUp = withHistory ? "the ongoing work in earlier_conversation or a likely follow-up" : "a likely follow-up question";
 	const questions: Record<string, ClassifierQuestion> = {
 		keep_whole: {
 			type: "bool",
 			instructions:
 				`Is all of ${scope} still needed, so that removing any chunk would lose evidence that final_answer relies on ` +
-				"or information a likely follow-up question would need?",
+				`or information ${followUp} would need?`,
 			criteria: { true: "Keep everything", false: "Some chunks are noise for this answer and can be removed" },
 		},
 		focus: {
 			type: "choice",
 			instructions:
-				`Does final_answer draw on most of ${scope}, or does it rest on a few chunks? ` +
+				(withHistory
+					? `Do final_answer and the ongoing work in earlier_conversation draw on most of ${scope}, or on a few chunks? `
+					: `Does final_answer draw on most of ${scope}, or does it rest on a few chunks? `) +
 				"If a few, pick the most important chunk. If nothing in it matters any more, pick none.",
 			criteria: focusCriteria,
 		},
@@ -96,7 +108,9 @@ export function buildRequest(
 		const label = chunkLabel(chunk);
 		questions[label] = {
 			type: "bool",
-			instructions: `Does ${label} contain lines that final_answer relies on, or that a likely follow-up question about it would need?`,
+			instructions: withHistory
+				? `Does ${label} contain lines that final_answer relies on, or that the user's ongoing task in earlier_conversation will need, even if the current question is about something else?`
+				: `Does ${label} contain lines that final_answer relies on, or that a likely follow-up question about it would need?`,
 			criteria: { true: `Keep ${label}`, false: `${label} is noise for this answer` },
 		};
 	}

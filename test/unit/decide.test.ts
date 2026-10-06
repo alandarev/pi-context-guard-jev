@@ -57,6 +57,68 @@ test("buildRequest: state and one bool question per chunk", () => {
 	assert.doesNotMatch(JSON.stringify(request), /part \d of/);
 });
 
+test("buildRequest without history uses the single-run wording", () => {
+	for (const history of [undefined, { exchanges: [] }]) {
+		const request = buildRequest({ ...run, history }, candidate, segment, 0, 1, 30);
+		assert.equal("earlier_conversation" in request.state, false);
+		assert.doesNotMatch(JSON.stringify(request), /earlier_conversation|ongoing work/);
+		assert.equal(
+			request.questions.keep_whole.instructions,
+			"Is all of the tool output still needed, so that removing any chunk would lose evidence that final_answer relies on or information a likely follow-up question would need?",
+		);
+		assert.equal(
+			request.questions.chunk_1.instructions,
+			"Does chunk_1 contain lines that final_answer relies on, or that a likely follow-up question about it would need?",
+		);
+	}
+});
+
+test("buildRequest with history: earlier_conversation after situation, before user_question", () => {
+	const history = {
+		summary: "Earlier: set up the repo.",
+		firstRequest: "Migrate the API clients to a retry helper.",
+		exchanges: [
+			{ user: "Which clients retry?", assistant: "jobStatus and orderStatus." },
+			{ user: "Thanks", assistant: "" },
+		],
+	};
+	const request = buildRequest({ ...run, notes: "n", history }, candidate, segment, 0, 1, 30);
+	assert.deepEqual(Object.keys(request.state), [
+		"situation",
+		"earlier_conversation",
+		"user_question",
+		"final_answer",
+		"agent_notes_during_the_run",
+		"tool",
+		"tool_arguments",
+		"output_size",
+		"chunks",
+	]);
+	assert.deepEqual(request.state.earlier_conversation, {
+		summary: "Earlier: set up the repo.",
+		first_request: "Migrate the API clients to a retry helper.",
+		recent_exchanges: [{ user: "Which clients retry?", assistant: "jobStatus and orderStatus." }, { user: "Thanks" }],
+	});
+	assert.match(request.state.situation as string, /earlier_conversation shows the session so far/);
+	assert.match(request.questions.keep_whole.instructions, /the ongoing work in earlier_conversation or a likely follow-up would need\?$/);
+	assert.match(request.questions.focus.instructions, /^Do final_answer and the ongoing work in earlier_conversation draw on most of the tool output, or on a few chunks\?/);
+	assert.equal(
+		request.questions.chunk_2.instructions,
+		"Does chunk_2 contain lines that final_answer relies on, or that the user's ongoing task in earlier_conversation will need, even if the current question is about something else?",
+	);
+	// Criteria do not change.
+	const focusQuestion = request.questions.focus;
+	assert.ok(focusQuestion.type === "choice");
+	assert.equal(focusQuestion.criteria.none, "Nothing in the tool output is needed any more");
+});
+
+test("buildRequest with only some history parts omits the others", () => {
+	const onlySummary = buildRequest({ ...run, history: { summary: "s", exchanges: [] } }, candidate, segment, 0, 1, 30);
+	assert.deepEqual(onlySummary.state.earlier_conversation, { summary: "s" });
+	const onlyExchanges = buildRequest({ ...run, history: { exchanges: [{ user: "u", assistant: "a" }] } }, candidate, segment, 0, 1, 30);
+	assert.deepEqual(onlyExchanges.state.earlier_conversation, { recent_exchanges: [{ user: "u", assistant: "a" }] });
+});
+
 test("buildRequest: notes, clipping, no args, segment wording", () => {
 	const longAnswer = "A".repeat(10_000);
 	const request = buildRequest({ question: "q", answer: longAnswer, notes: "thinking" }, { ...candidate, args: undefined }, segment.slice(1), 1, 3, 300);

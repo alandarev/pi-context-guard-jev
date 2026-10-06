@@ -89,7 +89,8 @@ export function formatStatus(stats: GuardStats, state: StatusState, color: Color
 	if (state === "busy") return color("accent", `${icon} distilling…`);
 	if (state === "problem") return color("warning", `${icon} ${problem ?? "guard unavailable"}`);
 	if (stats.savedTokens === 0) return color("dim", `${icon} 0 saved`);
-	return `${color("success", `${icon} −${formatTokens(stats.savedTokens)} tok`)}${color("dim", ` · ${stats.distilledResults} distilled`)}`;
+	// "🛡 −4.2k · 1": ≈ tokens kept out of context · distilled results.
+	return `${color("success", `${icon} −${formatTokens(stats.savedTokens)}`)}${color("dim", ` · ${stats.distilledResults}`)}`;
 }
 
 export const formatCost = (usd: number): string => (usd === 0 ? "$0" : usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`);

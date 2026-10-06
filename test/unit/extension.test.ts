@@ -162,6 +162,8 @@ test("agent_before_settle appends context edits and a run record after other dra
 	assert.ok(calls[0].options.signal instanceof AbortSignal);
 	assert.equal(calls[0].request.state.user_question, "Where is foo used?");
 	assert.equal(calls[0].request.state.final_answer, "foo is used in log line 1.");
+	// Default historyExchanges (3): the earlier exchange goes to Jev as earlier_conversation.
+	assert.deepEqual(calls[0].request.state.earlier_conversation, { recent_exchanges: [{ user: "old question", assistant: "old answer" }] });
 });
 
 test("agent_before_settle ignores runs that did not complete", async () => {

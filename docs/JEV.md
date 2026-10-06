@@ -51,8 +51,21 @@ question per chunk separated them clearly: cited files 0.90–0.93, noise 0.14�
 ### Size, latency and cost
 
 A 30k-character grep with 28 chunks and 30 questions: **13,155 input tokens, 745 ms, $0.00055**. Code is
-about 2.3 characters per token. With a 32k-token context, that is why `maxSegmentChars` is 40,000 and
-`maxChunksPerSegment` is 40.
+about 2.3 characters per token.
+
+**Worst-case budget probe** (after earlier conversation was added to the state): every history part at its
+clip limit (2,000-character summary, 1,000-character first request, 800 + 1,200 characters per exchange),
+a 4,000-character question, a 6,000-character answer, 2,000 characters of notes, and one 40-chunk segment of
+31,848 characters of dense `rg` output over Pi's `dist/core`:
+
+| `historyExchanges` | Request bytes | Input tokens | Latency | Cost |
+|---|---|---|---|---|
+| 3 (default) | 68,951 | **19,630** | 650 ms | $0.00082 |
+| 10 (maximum) | 83,214 | **23,619** | 799 ms | $0.00099 |
+
+Both fit Jev's 32k-token context with room to spare (the target was ≤ 28k), so `maxSegmentChars` is
+**32,000** (lowered from 40,000 to keep the worst case well below 32k now that history is included) and
+`maxChunksPerSegment` stays 40. Nested objects in the state (`earlier_conversation`) are accepted.
 
 In the live end-to-end runs, one qualifying run took 2 Jev requests: 550 ms and $0.00083 (GPT-6 Luna run), and
 1.18 s and $0.00084 (Claude run).
@@ -86,6 +99,55 @@ noise. It is off by default.
 
 `read` results of about 2.3k characters always ended as `not-worth`: Jev kept 2 of 3 chunks. So
 `minResultChars` was raised to 4,000.
+
+### Earlier conversation (`historyExchanges`)
+
+Without history, Jev only sees the run's own question and answer. A broad search in a session whose goal was
+stated earlier ("I'm about to migrate every API client to a shared retry helper") then loses exactly the
+lines the ongoing work needs, because this run's question ("where is StatusBadge used?") does not mention
+them. So the state now carries `earlier_conversation`: the latest compaction/branch summary, the first
+prompt and the last 3 exchanges (prompt + last assistant text), clipped (docs/DESIGN.md).
+
+**Wording.** Offline A/B on the real turn-2 run of the e2e `history` scenario (Claude's `rg -n -i status`,
+57 chunks, 11 of them with `src/api` retry lines; P = per-chunk probability for those 11 chunks, 3 samples
+unless noted):
+
+| Variant | P(src/api chunks) | src/api chunks kept | All chunks kept |
+|---|---|---|---|
+| No history | 0.13–0.33 | 0 | 9 |
+| History, chunk_N "…or that the ongoing work in earlier_conversation or a likely follow-up will need?" | 0.21–0.42 | 0 | 7–8 |
+| History, chunk_N "…or that the ongoing work in earlier_conversation will need, even if user_question is about something else?" (2 samples) | 0.27–0.50 | 0 | 8 |
+| History, chunk_N "…or that the user's ongoing task in earlier_conversation will need, even if the current question is about something else?" (3 samples) | 0.37–0.64 | 2–5 | 9–12 |
+| Same wording, but the earlier exchange replaced by an unrelated "I'll ask a few questions" (control, 2 samples) | 0.20–0.35 | 0 | 7 |
+
+The last wording is what `src/decide.ts` sends: it is the only one that lifts the relevant chunks over the
+0.6 threshold, and the control shows it does not keep more when the history is unrelated. The effect is
+still borderline (the relevant chunks sit around the threshold), so history makes Jev keep *some* of
+what the ongoing work needs, not reliably all of it; `recall` remains the safety net.
+
+**Live A/B** (`node test/e2e/run-e2e.mjs --scenario history`, with and without `--config
+'{"historyExchanges":0}'`). Turn 1 states the retry-migration goal, turn 2 is the broad StatusBadge search,
+turn 3 asks which clients retry on 429 without a new search (9 of the 10 clients do). Round 1 used the
+first wording above, round 2 the final one; one run per cell:
+
+| Model, history | Round | src/api retry lines kept in turn 2 (of 80; with 429) | Turn-2 output, chars before → after | Jev | Turn 3 used `recall` | Turn 3 answer |
+|---|---|---|---|---|---|---|
+| GPT-6 Luna, on | 1 | 0 | 36,113 → 1,772 | 518 ms | yes | correct |
+| GPT-6 Luna, off | 1 | 0 | 36,113 → 2,100 | 594 ms | no | wrong ("can't determine") |
+| Claude Sonnet 5.5, on | 1 | 0 | 36,113 → 2,612 | 685 ms | yes | correct |
+| Claude Sonnet 5.5, off | 1 | 8 (3) | 36,113 → 4,439 | 588 ms | yes | correct list; headline says "10" |
+| GPT-6 Luna, on | 2 | **72 (21)** | 36,113 → 12,402 | 568 ms | yes | correct |
+| GPT-6 Luna, off | 2 | 0 | 36,113 → 1,753 | 564 ms | yes | correct |
+| Claude Sonnet 5.5, on | 2 | 5 (1) | 22,641 → 2,103 (Claude ran `rg … \| head -200`) | 555 ms | yes | missed `ticketStatus` (cut by Claude's own `head -200`) |
+| Claude Sonnet 5.5, off | 2 | 0 | 36,113 → 2,638 | 547 ms | yes | correct list; headline says "eight" |
+
+Honest reading: with the first wording, history made no difference to what was kept (0 retry lines with
+history; the one run that kept 8 had history off). With the final wording, GPT round 2 kept 72 of the 80
+retry lines (9 of the 10 clients), at the cost of keeping 12.4k instead of ~1.8k characters; Claude round 2
+ran a different, truncated search (`| head -200`) and kept 5. It did not change turn-3 behaviour: the main models used `recall` in 7 of 8
+runs either way, and the turn-3 answers were about as good with and without history. Where history pays
+off is the context the model already has after turn 2, which avoids the recall round trip only when enough
+is kept. Single runs per cell; the variance between rounds is large.
 
 ## The final question set
 

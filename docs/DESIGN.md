@@ -60,6 +60,20 @@ after it is the run. Assistant
 text in the run gives the **answer** (the last text) and the **notes** (all earlier text). Tool calls are
 indexed by id so each result can be matched with its tool name and arguments.
 
+**History.** The projected entries *before* the run's user message give the **history** (`historyExchanges`,
+default 3; `0` turns all of it off):
+
+- `summary`: the text (`summary` field) of the latest `compactionSummary` or `branchSummary` message, at
+  most 2,000 characters.
+- `exchanges`: the last N earlier exchanges, oldest first. Every user message starts one (steering messages
+  included; an image-only prompt shows as `[the user sent only an image]`). Each holds the prompt (at most
+  800 characters) and the **last** assistant text before the next user message (at most 1,200). Tool calls
+  and tool results are left out.
+- `firstRequest`: the first user prompt in the projection (at most 1,000 characters), only when it is not
+  already one of the included exchanges. It often states the goal of the whole session.
+
+Clipping keeps the head (70%) and tail with a `[…]` line in between.
+
 ### 2. Candidates
 
 A tool result in the span is a candidate if all of these hold:
@@ -94,12 +108,12 @@ separators) and at least 60% of them look like `path:line:` or `path-line-`. Suc
 **Other output** is cut into windows of about the target size. If a blank line falls in the last 40% of a
 window, the window ends after it. A single line longer than the target becomes its own chunk.
 
-**Segments.** Consecutive chunks are grouped into segments of at most `maxSegmentChars` (40,000)
+**Segments.** Consecutive chunks are grouped into segments of at most `maxSegmentChars` (32,000)
 characters and `maxChunksPerSegment` (40) chunks. A chunk larger than the limit (one huge line) gets a
 segment of its own, which is **never sent**: it is kept as it is, with reason `oversize`.
-Jev's context window is 32k tokens. Code is about 2.3 characters per token, and a measured 30k-character grep
-with 30 questions came to 13,155 input tokens, so 40,000 characters leaves room for the state and the
-questions.
+Jev's context window is 32k tokens. The worst case (every history part full at the default 3 exchanges,
+a 4k question, a 6k answer, 2k notes and a 32k-character, 40-chunk grep segment) measured 19,630 input
+tokens; with `historyExchanges` 10 it was 23,619 (docs/JEV.md).
 
 ### 4. One Jev request per segment (`decide.ts → buildRequest`)
 
@@ -107,7 +121,8 @@ The request **state** contains:
 
 | Field | Content |
 |---|---|
-| `situation` | A fixed explanation: a coding agent answered the question; this is one tool output split into chunks; only kept chunks remain visible |
+| `situation` | A fixed explanation: a coding agent answered the question; this is one tool output split into chunks; only kept chunks remain visible. With history it adds that `earlier_conversation` shows the session so far and the agent is likely to continue that work |
+| `earlier_conversation` | Only when there is history: `{ summary, first_request, recent_exchanges: [{ user, assistant }, …] }`, empty parts omitted |
 | `user_question` | The question, at most 4,000 characters (head and tail kept) |
 | `final_answer` | The answer, at most 6,000 characters |
 | `agent_notes_during_the_run` | Earlier assistant text, at most 2,000 characters (only if there is any) |
@@ -122,6 +137,12 @@ The **questions**, all in the same request:
 | `keep_whole` | bool | Is all of the output still needed, so that removing any chunk would lose evidence or follow-up information? |
 | `focus` | choice: `whole`, `none`, `chunk_N`… | Does the answer draw on most of the output (`whole`), on nothing (`none`), or on a few chunks, of which `chunk_N` is the most important? |
 | `chunk_N` | bool, one per chunk | Does this chunk contain lines the answer relies on, or that a likely follow-up would need? |
+
+With history, the questions also name the earlier conversation next to `final_answer`: `keep_whole` and
+`focus` mention "the ongoing work in earlier_conversation", and each `chunk_N` asks "…lines that
+final_answer relies on, or that the user's ongoing task in earlier_conversation will need, even if the
+current question is about something else?" (the measured wording, docs/JEV.md). Without history the wording
+is exactly the single-run wording that was tuned on live cases.
 
 ### 5. Decision per segment (`decide.ts → interpret`)
 
@@ -212,6 +233,9 @@ Nothing is kept in memory. Every redraw recomputes from the session:
 - **Jev usage:** the `context-guard` records on the active branch (`getBranch()`) are summed.
 
 So the numbers follow branches, `/tree`, reloads and compaction.
+
+The ready-state footer is `🛡 −4.2k · 1`: ≈ tokens kept out of context · distilled results (the first part
+in the theme's success colour, the rest dimmed). Before anything is distilled it shows `🛡 0 saved`.
 
 ## Recall
 

@@ -13,15 +13,15 @@ These need Node ≥ 22.18, which runs the `.ts` files directly. There is no netw
 
 | File | Covers |
 |---|---|
-| `run.test.ts` | Run span (including image-only prompts), question/answer/notes, candidate rules (errors, images, excluded tools, short, already-distilled and other-extension-edited results), steering messages |
+| `run.test.ts` | Run span (including image-only prompts), question/answer/notes, candidate rules (errors, images, excluded tools, short, already-distilled and other-extension-edited results), steering messages; history (last N exchanges, first request, compaction/branch summaries, image-only and steering prompts, clipping, `historyExchanges` 0) |
 | `chunk.test.ts` | grep detection, grouping by file, context lines and `--`, `-digits-` file names, split/merge rules, plain-text windows, segment limits |
-| `decide.test.ts` | Request shape; the decision order (error, missing answers, `keep_whole`, strong/weak `whole`, chunks, `none`); `citedFiles` |
+| `decide.test.ts` | Request shape, with and without `earlier_conversation` (state order, omitted parts, history wording vs. the unchanged single-run wording); the decision order (error, missing answers, `keep_whole`, strong/weak `whole`, chunks, `none`); `citedFiles` |
 | `distill.test.ts` | Skips, edits, `removed`, `not-worth`, failures, time budget (including a classifier that never answers and late answers), parent abort, concurrency limit, multi-segment outputs, oversize segments never sent, `keepCitedFiles`, usage sums |
 | `render.test.ts` | Labels, verbatim chunks with omission lines, `read` offsets, file lists, full removal |
 | `cache-pin.test.ts` | API-key and OAuth payloads, trailing system messages, TTL selection and `ttl-conflict`, string content, tool-result-only messages, over-budget restore |
 | `stats.test.ts` | Savings from the projection, run records, status texts and colours, cost format |
 | `recall.test.ts` | Original output, pattern (length cap, 4,000-char match window, catastrophic-regex timeout), offset/limit, line and byte caps, oversized lines |
-| `config.test.ts` | Defaults, validation and ranges, `provider/id` parsing, load/save round trip |
+| `config.test.ts` | Defaults, validation and ranges (incl. `historyExchanges` 0–10 integer), `provider/id` parsing, load/save round trip |
 | `extension.test.ts` | The real entry point (see below) |
 
 `extension.test.ts` loads `src/index.ts` through **Pi's own extension loader** (`loadExtensions` from the
@@ -41,7 +41,7 @@ This uses a real Pi, a real main model and real Jev requests. **It costs money o
 main-model requests per turn, plus a few Jev requests (under $0.001 per distilled run).
 
 ```bash
-node test/e2e/run-e2e.mjs --model <provider/id> [--ext <path>]... [--scenario badge|long] \
+node test/e2e/run-e2e.mjs --model <provider/id> [--ext <path>]... [--scenario badge|long|history] \
   [--config '<JSON>'] [--no-guard] [--turns N] [--thinking level]
 ```
 
@@ -49,7 +49,7 @@ node test/e2e/run-e2e.mjs --model <provider/id> [--ext <path>]... [--scenario ba
 |---|---|---|
 | `--model` | (required) | Main model, e.g. `openai-codex/gpt-6-luna` or `anthropic/claude-sonnet-5-5` |
 | `--ext` | none | Extra extension to load; can be repeated (e.g. an auth extension) |
-| `--scenario` | `badge` | `badge`: 3 turns about `StatusBadge` usages. `long`: 2 turns with 10+ sequential tool calls, for the cache pin. |
+| `--scenario` | `badge` | `badge`: 3 turns about `StatusBadge` usages. `long`: 2 turns with 10+ sequential tool calls, for the cache pin. `history`: 3 turns for the earlier-conversation feature (below). |
 | `--config` | `{}` | context-guard settings for this run, e.g. `'{"pinAnthropicCache":false}'` |
 | `--no-guard` | off | Control run without context-guard |
 | `--turns` | `3` | Turns to run (capped by the scenario) |
@@ -81,7 +81,17 @@ How it works:
 | turn 3 quotes the removed line exactly | The model quoted line 3 of `src/api/jobStatus.ts` from the "first search" |
 | turn 3 used recall (line was distilled away) | Only when that line is missing from turn 3's payload: the model must have called `recall` |
 | long: turn 1 produced context edits / 10+ tool calls / 10+ model requests | The long scenario really was long and sequential |
+| history: turn 2 produced context edits | The broad search in turn 2 was distilled |
+| history: turn 3 names exactly the clients that retry on 429 | The answer names the 9 clients whose fixture file has `=== 429`; a client named only to say it does *not* retry is allowed |
 | anthropic requests stay within 4 breakpoints | For `anthropic/…` models: the pin never exceeds the limit |
+
+**`history` scenario.** Turn 1 only states a session goal ("I'm about to migrate every API client in
+src/api to a shared retry helper… just acknowledge"), turn 2 is the broad `rg -n -i status` StatusBadge
+search, turn 3 asks which clients retry on HTTP 429 without a new search ("if it's not in your context, use
+recall"). Run it with and without `--config '{"historyExchanges":0}'` to compare. Besides the checks, the
+summary has a `history` block: `keptApiRetryLines` / `kept429Lines` (src/api retry lines kept in turn 2's
+distilled text), the turn-2 Jev results and ms, turn 3's tool calls and whether it used `recall`, and the
+clients turn 3 named. Results are in [JEV.md](JEV.md#earlier-conversation-historyexchanges).
 
 With the guard on, the badge scenario has 9 checks, plus 1 for Anthropic models. Most guard checks are
 skipped with `--no-guard`.
@@ -112,6 +122,8 @@ node test/e2e/run-e2e.mjs --model anthropic/claude-sonnet-5-5 --ext ~/.pi/agent/
 node test/e2e/run-e2e.mjs --model anthropic/claude-sonnet-5-5 --ext ~/.pi/agent/npm/node_modules/pi-claude-auth --scenario long --config '{"pinAnthropicCache":false}'
 node test/e2e/run-e2e.mjs --model openai-codex/gpt-6-luna
 node test/e2e/run-e2e.mjs --model openai-codex/gpt-6-luna --no-guard
+node test/e2e/run-e2e.mjs --model openai-codex/gpt-6-luna --scenario history
+node test/e2e/run-e2e.mjs --model openai-codex/gpt-6-luna --scenario history --config '{"historyExchanges":0}'
 ```
 
 ### Results so far (Pi 1.0.3)
@@ -122,6 +134,8 @@ node test/e2e/run-e2e.mjs --model openai-codex/gpt-6-luna --no-guard
 | Claude Sonnet 5.5, badge | 36,113 → 3,066 chars, 2 Jev requests, 1.18 s, $0.00084; turn 2 cacheRead 5,777 / cacheWrite 2,036; turn 3 used `recall`; 10/10 checks pass |
 | Claude Sonnet 5.5, long, with / without pin | first request after the run: cacheRead 5,810 / 1,693, cacheWrite 8,913 / 13,068 |
 | GPT-6 Luna, badge, with / without guard | turn 2 cacheRead 2,560 / 13,824 |
+| GPT-6 Luna, badge, after the history feature | 36,113 → ~2.3k chars; 9/9 checks pass (an earlier run in parallel with 4 others had one OpenAI cache miss on turn 2: 8/9) |
+| GPT-6 Luna / Claude Sonnet 5.5, history on / off | See [JEV.md](JEV.md#earlier-conversation-historyexchanges): 2 rounds × 4 runs |
 
 See [CACHE.md](CACHE.md) for what the cache numbers mean.
 
@@ -146,7 +160,7 @@ tmux capture-pane -p -t cg | tail -5     # footer: 🛡 0 saved
 
 tmux send-keys -t cg "Which parts of this codebase use the StatusBadge UI component? Start with rg -n -i status." Enter
 tmux capture-pane -p -t cg | tail -5     # while Jev runs: 🛡 distilling…
-tmux capture-pane -p -t cg | tail -5     # afterwards: 🛡 −4.2k tok · 1 distilled (numbers vary)
+tmux capture-pane -p -t cg | tail -5     # afterwards: 🛡 −4.2k · 1 (numbers vary)
 
 tmux send-keys -t cg "/guard" Enter
 tmux capture-pane -p -t cg -S -40        # model, savings, Jev runs/requests/cost, per-result traces
@@ -155,6 +169,6 @@ tmux kill-session -t cg
 ```
 
 Expected, as observed: the footer goes from `🛡 0 saved` to `🛡 distilling…` to
-`🛡 −4.2k tok · 1 distilled`. Pi's own context meter drops (33k to 17k in the observed run). `/guard` lists the
+`🛡 −4.2k · 1` (≈ tokens kept out of context · distilled results). Pi's own context meter drops (33k to 17k in the observed run). `/guard` lists the
 last run's results with traces such as `kw.15 focus=chunk_4:.52 keep 9/29`. Also try `/guard off` (footer
 `🛡 guard off`) and `/tree` back to before the run (savings go back to `0 saved`).
