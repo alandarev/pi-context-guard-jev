@@ -129,27 +129,29 @@ See [CACHE.md](CACHE.md) for what the cache numbers mean.
 
 This checks the status bar, the working message and `/guard` in the real interactive UI.
 
-Start a **fresh** tmux server with its own socket (`-L`) from the shell that has your credentials and network
-settings. An existing tmux server keeps the environment it was started with.
+Pi has to run with the same network access as your normal Pi sessions. A tmux server keeps the
+environment and network namespace it was started in. If your providers are only reachable through a VPN
+network namespace, start Pi inside it, e.g. `sudo ip netns exec <ns> sudo -E -u $USER pi …`, or your own
+wrapper.
 
 ```bash
 REPO=~/projects/pi/pi-context-guard-jev
 node $REPO/test/e2e/make-fixture.mjs /tmp/cg-fixture
 echo '{}' > /tmp/cg-fixture.json        # keeps /guard on|off away from your real settings
 
-tmux -L cg new-session -d -s cg -x 200 -y 50
-tmux -L cg send-keys -t cg "cd /tmp/cg-fixture && PI_CONTEXT_GUARD_CONFIG=/tmp/cg-fixture.json pi -e $REPO/src/index.ts" Enter
-# add  -e ~/.pi/agent/npm/node_modules/pi-claude-auth  for a Claude subscription
-tmux -L cg capture-pane -p -t cg | tail -5     # footer: 🛡 0 saved
+PI_CMD="pi -e $REPO/src/index.ts"       # prefix with your netns wrapper if needed
+# add  -e ~/.pi/agent/npm/node_modules/pi-claude-auth  for a Claude subscription in a -ne run
+tmux new-session -d -s cg -x 200 -y 50 -c /tmp/cg-fixture "PI_CONTEXT_GUARD_CONFIG=/tmp/cg-fixture.json $PI_CMD"
+tmux capture-pane -p -t cg | tail -5     # footer: 🛡 0 saved
 
-tmux -L cg send-keys -t cg "Which parts of this codebase use the StatusBadge UI component? Start with rg -n -i status." Enter
-tmux -L cg capture-pane -p -t cg | tail -5     # while Jev runs: 🛡 distilling…
-tmux -L cg capture-pane -p -t cg | tail -5     # afterwards: 🛡 −4.2k tok · 1 distilled (numbers vary)
+tmux send-keys -t cg "Which parts of this codebase use the StatusBadge UI component? Start with rg -n -i status." Enter
+tmux capture-pane -p -t cg | tail -5     # while Jev runs: 🛡 distilling…
+tmux capture-pane -p -t cg | tail -5     # afterwards: 🛡 −4.2k tok · 1 distilled (numbers vary)
 
-tmux -L cg send-keys -t cg "/guard" Enter
-tmux -L cg capture-pane -p -t cg -S -40        # model, savings, Jev runs/requests/cost, per-result traces
+tmux send-keys -t cg "/guard" Enter
+tmux capture-pane -p -t cg -S -40        # model, savings, Jev runs/requests/cost, per-result traces
 
-tmux -L cg kill-server
+tmux kill-session -t cg
 ```
 
 Expected, as observed: the footer goes from `🛡 0 saved` to `🛡 distilling…` to
