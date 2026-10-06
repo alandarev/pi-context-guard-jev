@@ -198,9 +198,9 @@ each Jev request sends the following to OpenRouter, which forwards it to TypeSaf
 - the final answer (up to 6,000 characters),
 - the assistant's notes written during the run (up to 2,000 characters),
 - excerpts of the earlier conversation in this session: the latest compaction or branch summary (up to
-  2,000 characters), the first prompt (up to 1,000), and the last 3 earlier exchanges, each one prompt (up to
-  800) and the last assistant text after it (up to 1,200). Tool calls and tool outputs of earlier runs are not
-  included in this part. Set `historyExchanges` to `0` to send none of it,
+  2,000 characters), the first prompt (up to 1,000), and the last 3 earlier exchanges, each one prompt
+  (up to 800) and the last assistant text after it (up to 1,200). Tool calls and tool outputs of earlier runs
+  are not included in this part. Set `historyExchanges` to `0` to send none of it,
 - the tool name and arguments,
 - the full text of the large tool output being judged, and of small outputs (from 400 characters; up to
   4,000 characters each). This can include source code, logs or anything else the tools returned,
