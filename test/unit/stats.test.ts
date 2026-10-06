@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MARKER } from "../../src/render.ts";
+import { EXCHANGE_STUB_PREFIX } from "../../src/items.ts";
 import { type Colorize, CUSTOM_TYPE, computeStats, formatCost, formatStatus, type GuardStats } from "../../src/stats.ts";
 import type { MessageLike, ProjectedEntryLike } from "../../src/types.ts";
 
@@ -48,7 +49,7 @@ test("computeStats sums context-guard custom entries", () => {
 });
 
 const identity: Colorize = (_color, text) => text;
-const empty: GuardStats = { distilledResults: 0, savedChars: 0, savedTokens: 0, runs: 0, checkpoints: 0, requests: 0, costUsd: 0 };
+const empty: GuardStats = { distilledResults: 0, omittedExchanges: 0, savedChars: 0, savedTokens: 0, runs: 0, checkpoints: 0, requests: 0, costUsd: 0 };
 
 test("formatStatus for each state", () => {
 	assert.equal(formatStatus(empty, "off", identity), "🛡 guard off");
@@ -81,4 +82,28 @@ test("computeStats counts mid-run checkpoints among runs", () => {
 	assert.equal(stats.runs, 3);
 	assert.equal(stats.checkpoints, 1);
 	assert.equal(stats.requests, 4);
+});
+
+test("computeStats counts omitted exchanges and their saved characters", () => {
+	const raw = (role: string, text: string) => ({ role, content: [{ type: "text", text }] });
+	const branch = [
+		{ type: "message", id: "u1", message: raw("user", "old prompt") },
+		{ type: "message", id: "a1", message: raw("assistant", "x".repeat(2_000)) },
+		{ type: "message", id: "u2", message: raw("user", "current") },
+	];
+	const stub = `${EXCHANGE_STUB_PREFIX} judged unrelated to the current work: "old prompt" (2 messages, ~500 tokens). Full exchange: recall({"entryId":"u1"}).`;
+	const projection = [
+		{ sourceEntry: { id: "u1", type: "message", message: raw("user", "old prompt") as never }, messages: [raw("user", stub) as never] },
+		// Pi keeps an omitted entry in the projection with no messages.
+		{ sourceEntry: { id: "a1", type: "message", message: raw("assistant", "x".repeat(2_000)) as never }, messages: [] },
+		{ sourceEntry: { id: "u2", type: "message", message: raw("user", "current") as never }, messages: [raw("user", "current") as never] },
+	];
+	const stats = computeStats(projection, branch as never);
+	assert.equal(stats.omittedExchanges, 1);
+	assert.equal(stats.distilledResults, 0);
+	assert.equal(stats.savedChars, "old prompt".length + 2_000 - stub.length);
+	assert.equal(formatStatus({ ...stats, savedTokens: 400, distilledResults: 2 }, "ready", identity), "🛡 −400 · 3");
+	// An entry of the exchange that is still visible (e.g. not editable) is not counted.
+	const visible = projection.map((e) => (e.sourceEntry.id === "a1" ? { ...e, messages: [raw("assistant", "x".repeat(2_000)) as never] } : e));
+	assert.equal(computeStats(visible, branch as never).savedChars, Math.max(0, "old prompt".length - stub.length));
 });

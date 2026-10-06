@@ -14,10 +14,12 @@ evidence behind the thresholds are in [JEV.md](JEV.md). Cache behaviour is in [C
 | `src/chunk.ts` | `chunkOutput` (grep-aware chunking) and `segmentChunks` (grouping chunks into Jev requests) |
 | `src/decide.ts` | `buildRequest` (the run-end Jev request), `buildCheckpointRequest` (the mid-run one) and `interpret` (answers → keep set); `citedFiles` |
 | `src/distill.ts` | `distillRun`: chunk, run Jev requests in parallel within a time budget, decide per result, build `context_edit` drafts |
+| `src/items.ts` | Whole items: small outputs (`collectSmall`) and old exchanges (`collectExchanges`), their Jev requests, stubs and edits, and `judgeItems` (batched, parallel, time budget) |
+| `src/process.ts` | `processItems`: large outputs, small outputs and old exchanges of one pass, judged in parallel and merged into one list of edits and records |
 | `src/render.ts` | The replacement text: header, verbatim chunks, omission lines; the `[context-guard]` marker |
 | `src/cache-pin.ts` | Anthropic breakpoints: the previous user question, and the read point after edits (`placeGuardBreakpoints`) |
 | `src/stats.ts` | Savings and Jev usage computed from the session; status-bar text |
-| `src/recall.ts` | The text returned by `recall` |
+| `src/recall.ts` | The text returned by `recall` (a tool output, or the transcript of an omitted exchange) |
 | `src/types.ts` | Loose structural types for the Pi objects used, so the pure modules can be tested without Pi |
 
 Everything except `index.ts` is pure. `distillRun` gets the classifier as an injected function.
@@ -193,6 +195,69 @@ In this order:
   usually already cleared at this boundary, so Esc does not cancel it; the time budget is the limit.
 - An exception from the whole pass shows a warning and leaves the run untouched.
 
+## Items: what one pass judges
+
+Every pass (run end, or a mid-run checkpoint) collects three kinds of item and judges them in parallel
+(`processItems`); their edits and results go into one record.
+
+| Kind | What | How it is judged | Dropped item becomes |
+|---|---|---|---|
+| `large` | Tool results of the current run of at least `minResultChars` (4,000), under the candidate rules above | Chunked, one request per segment (above) | The kept chunks verbatim with omission lines |
+| `small` | Tool results of the current run from `smallResultMinChars` (400) up to `minResultChars`, under the same rules | Whole: one bool per item, many items per request | A one-line stub: `[context-guard] Omitted the output of bash \`…\` (1.2k chars): judged no longer needed. Full output: recall({"entryId":"…"}).` |
+| `exchange` | Old exchanges (below) | Whole: one bool per exchange, several per request | A stub on the prompt, every other entry omitted |
+
+**Small outputs** (`collectSmall`). An output whose stub would not be shorter is skipped. Each item carries
+the tool label, `status: failed` for error results, `superseded` when a later call made it out of date
+(`supersededBy`, as for large outputs mid-run), and the output (at most 4,000 characters). The question is
+"will the agent still need the output in item_N?" mid-run, or "does item_N contain anything that
+final_answer relies on, or that a likely follow-up would need?" at run end; both say that an output marked
+superseded is out of date. An item is kept when P ≥ `smallKeepThreshold` (0.45; probe in
+[JEV.md](JEV.md#small-outputs)). Mid-run, small outputs follow the same age rule and memo as large ones; at
+run end every small output without the marker is judged, including those kept at a checkpoint.
+
+**Old exchanges** (`collectExchanges`). An exchange is a user prompt and every entry up to the next one:
+assistant messages, tool calls and results, custom messages such as subagent notices. Eligible are
+exchanges before the current run's user message, without the last `keepRecentExchanges` (2) before it,
+that completed (their last assistant message has no tool calls, so a span cut by a steering message is
+never one), that are not already omitted (their prompt shows the stub), that were not judged during the
+current run (`exchangeMemo`: exchange results in records after the last user message, except deferred
+ones), and that can be recovered and are worth it: no message with an image, no entry whose model-visible
+content differs from the raw entry for any reason other than our own marker (another extension's edit,
+or an omission by someone else, which Pi keeps in the projection as an entry with no messages), at least
+2,000 characters of editable content, and a stub shorter than that content. A kept exchange is
+judged again in a later run, against that run's work. Compaction and branch summaries are never part of an
+exchange; entries Pi cannot edit (system messages, `!` shell executions) stay in place.
+
+Jev sees the current work (`user_question`, `earlier_conversation`, and `agent_progress` mid-run or
+`final_answer` at run end) and, per exchange, the prompt (at most 600 characters), the last assistant text
+(800), the tool calls as `toolLabel()`s (at most 20) and the size. The question: "Is exchange_N still
+relevant to the current work? Relevant means the agent may need its details: the same files, task,
+decisions or facts." An exchange is omitted only when P < `exchangeOmitThreshold` (0.2; probe in
+[JEV.md](JEV.md#old-exchanges)). Then the prompt entry gets the stub
+`[context-guard] Omitted an earlier exchange judged unrelated to the current work: "<first 120 characters of the prompt>" (N messages, ~Mk tokens). Full exchange: recall({"entryId":"<prompt entry id>"}).`
+and every other editable entry gets `replacement: null`, which omits it from model context. The record's
+result for the exchange lists exactly those entry ids (`omitted`), and `recall` on the stub shows exactly
+the prompt and those entries. Tool calls and
+their results are omitted together. The resulting shapes (a stub user message right before the next user
+message; spans without assistant and tool-result messages) are accepted by Anthropic (with
+`pi-claude-auth`) and OpenAI Codex, checked live with `test/e2e/omit-probe.ts` and the `topics` scenario.
+
+**Run-end break-even for exchanges** (`exchangeBreakEven`, on). After the pass is judged, its exchange
+omissions are checked: their marginal cache cost is the rewrite with them minus the rewrite the pass's
+other edits cause anyway (`rewriteCharsFor`, with the trusted read point and floor rules of
+[CACHE.md](CACHE.md); on OpenAI Codex any edit costs the whole context, so exchanges ride along for free
+when the pass edits anything else). If that cost is above zero, the omissions must save at least
+`exchangeMinSavingChars` (8,000) and pass `paysOff` with as many later requests as the session has had so
+far (model-visible assistant messages). Otherwise they are deferred: their edits are dropped, their results
+say `kept` / `deferred`, and they are judged again at later run ends against the work of that run, so
+deferred exchanges accumulate until their total pays off. `exchangeBreakEven: false` always omits
+unrelated exchanges.
+
+**Batching.** Whole items are grouped into requests of at most `maxSegmentChars` characters of item text and
+`maxChunksPerSegment` (40) items, under the same `timeoutMs` budget; the three kinds run at the same time,
+and one shared limiter keeps at most `concurrency` (6) Jev requests in flight across all of them. An item without an
+answer (error, timeout) is kept and asked again next time.
+
 ## Mid-run checkpoints
 
 A 30–120 minute autonomous run would otherwise carry every tool output until it ends; Pi compacts only
@@ -210,11 +275,11 @@ handler returns `[...event.entries, ...edits, record]`, and it never asks for `c
 **When.** At the end of a turn whose assistant message has tool calls (the final turn of a run is left to
 run-end distillation), with `outcome: "completed"` and `midRun` on:
 
-1. **Eligible outputs** (`collectCheckpoint`): tool results of the current run that pass the candidate
-   rules above, whose call was made at least `midRunMinAgeTurns` (4) turns before the current turn
-   (turn = assistant message index in the run), and that are not in the memo.
+1. **Eligible items:** large outputs (`collectCheckpoint`) and small outputs (`collectSmall`) of the current
+   run whose call was made at least `midRunMinAgeTurns` (4) turns before the current turn (turn = assistant
+   message index in the run) and that are not in the memo, and old exchanges not judged during this run.
 2. **Batch:** their total must reach `midRunBatchChars` (60,000; `midRunBatchCharsOpenAI` for
-   `openai-codex` models). Small outputs therefore accumulate, and edits come in rare batches.
+   `openai-codex` models), so edits come in rare batches.
 3. **Break-even** (`midRunBreakEven`): the checkpoint must be likely to pay for its one-time cache
    rewrite: `pending chars × turns so far ≥ factor × rewrite chars`, with factor 13 and the whole context
    for OpenAI Codex; factor 16 for Anthropic, where the rewrite is the context after the read point the
@@ -222,7 +287,10 @@ run-end distillation), with `outcome: "completed"` and `midRun` on:
    or, without one, after the question (the floor; with `pinAnthropicCache` off, the whole context); and
    factor 16 and the context from the first eligible output on for other providers
    (derivation in `checkpoint.ts` and [CACHE.md](CACHE.md#mid-run-checkpoints)). "Turns so far" stands in
-   for the turns still to come.
+   for the turns still to come. The rewrite starts at the earliest edited entry: an old exchange comes
+   before the question, so with exchanges in the batch the Anthropic rewrite is everything after the latest
+   trusted entry before that exchange, or the whole context. If the whole batch does not pay off, the rule
+   is tried for the tool outputs alone, and the exchanges wait for run end.
 
 Then all eligible outputs go to `distillRun` with the checkpoint request builder and
 `chunkKeepThreshold = midRunChunkKeepThreshold` (0.6), under the same `timeoutMs` budget, abort signal and
@@ -250,9 +318,10 @@ the returned drafts would then skip those outputs forever. Reading the branch al
 compaction and reloads correct without any rebuild step. The only in-memory state is the log of cache
 entries this process wrote (below), which only ever adds a read point.
 
-**Memo.** Each output is judged mid-run at most once. The memo is the set of results in the mid-run records
-on the branch, except those Jev never answered for (`timeout`, `error`, `aborted`), which the next checkpoint
-asks again. A "keep" is therefore not re-asked at every checkpoint.
+**Memo.** Each output is judged mid-run at most once. The memo is the set of output results in the mid-run
+records on the branch, except those Jev never answered for (`timeout`, `error`, `aborted`), which the next
+checkpoint asks again. A "keep" is therefore not re-asked at every checkpoint. Old exchanges have their own
+memo per run (see Items).
 
 **Run end judges kept outputs again.** An output kept at a checkpoint (whole, or `not-worth`) is a
 candidate again at run end, this time with the final answer: files the agent was still editing are usually not
@@ -321,10 +390,13 @@ Each run (and each mid-run checkpoint) that made at least one Jev request also a
 | `savedChars` | Characters removed by this run's edits |
 | `requests`, `inputTokens`, `costUsd`, `ms` | Jev usage for the run |
 | `timedOut` | The time budget ran out |
-| `results[]` | One per candidate: `entryId`, `tool`, `label`, `outcome` (`distilled`, `removed`, `kept`), `reason`, `beforeChars`, `afterChars`, `jev` |
+| `results[]` | One per item: `kind` (`large`, `small`, `exchange`; absent means large), `entryId` (for an exchange, its prompt entry), `tool`, `label`, `outcome` (`distilled`, `removed`, `kept`), `reason`, `beforeChars`, `afterChars`, `jev` |
 
 `reason` is one of `chunks`, `none-needed`, `not-worth`, `all-chunks`, `whole-needed`, `whole-chosen`,
-`no-answer`, `error` or `timeout` (several are joined with commas). `jev` holds one trace per segment, such as
+`no-answer`, `error` or `timeout` (several are joined with commas) for large outputs, `needed` or
+`not-needed` for small outputs, and `relevant`, `unrelated` or `deferred` for exchanges (an omitted exchange's
+result also has `omitted`, the entry ids that got `replacement: null`). Whole items have the trace
+`p.06` (P of the bool). `jev` holds one trace per segment, such as
 `kw.15 focus=chunk_4:.52 keep 9/29` or `kw.82 focus=whole:.71 keep all (whole-needed)`. That is
 P(`keep_whole`), the focus choice and its probability, and the result. `/guard` prints these for the last
 record (run or checkpoint) and counts the checkpoints.
@@ -336,41 +408,53 @@ The extension does not write Jev's usage into Pi's own usage entries. It is reco
 Nothing is kept in memory. Every redraw recomputes from the session:
 
 - **Savings:** Pi's session projection (`buildSessionProjection()`) is checked for tool results whose
-  model-visible text starts with `[context-guard]` while the raw entry does not. Each one adds raw length
-  minus visible length. Tokens are estimated as characters ÷ 4.
+  model-visible text starts with `[context-guard]` while the raw entry does not; each one adds raw length
+  minus visible length. A prompt that shows the exchange stub adds the raw length of its exchange (the
+  prompt and the entries up to the next user message that the model no longer sees: Pi keeps an omitted
+  entry in the projection with no messages) minus the stub.
+  Tokens are estimated as characters ÷ 4.
 - **Jev usage:** the `context-guard` records on the active branch (`getBranch()`) are summed.
 
 So the numbers follow branches, `/tree`, reloads and compaction.
 
-The ready-state footer is `🛡 −4.2k · 1`: ≈ tokens kept out of context · distilled results (the first part
+The ready-state footer is `🛡 −4.2k · 1`: ≈ tokens kept out of context · distilled outputs plus omitted
+exchanges (the first part
 in the theme's success colour, the rest dimmed). Before anything is distilled it shows `🛡 0 saved`.
 
 ## Recall
 
 `recall` reads the raw entry with `ctx.sessionManager.getEntry(entryId)`. `context_edit` never changes that
-entry. The tool returns the whole text, or only lines that match `pattern` (with line numbers), or an
+entry. For a tool result it returns the output; for a user prompt (the stub of an omitted exchange) it
+returns a transcript of the raw exchange from the branch: `## user`, `## assistant` with the text and
+`[tool call] name {arguments}` lines, `## tool result (tool)` and `## custom message (type)` sections, for
+exactly the entries the latest record lists as `omitted` (without such a record, up to the next user
+message). The tool returns the whole text, or only lines that match `pattern` (with line numbers), or an
 `offset`/`limit` window. Output is capped at 2,000 lines and 50 KB, with a continuation note; a single
 line longer than 50 KB is cut with a `[line N cut at 50KB]` note. `pattern` is a JavaScript regex of at most
 500 characters, matched against the first 4,000 characters of each line inside a `node:vm` sandbox with a
 1-second timeout, so a catastrophic pattern returns an error instead of freezing Pi. An id that is
-not a tool result gives an error that tells the model to use the id from a `[context-guard]` header.
+neither a tool result nor a user prompt on the branch gives an error that tells the model to use the id
+from a `[context-guard]` note.
 
 ## Pitfalls
 
 - **Never advance state on returned drafts.** A later handler may replace them, or Pi may reject the list;
   read state back from the branch.
-- **Never use `replacement: null` on a tool result.** The matching `tool_use` would lose its result, and
-  providers reject the request. A fully removed result is always replaced with a one-line stub.
-- **Never edit assistant messages.** A replacement turns the content into one text block, which drops
-  thinking, signatures and tool calls.
+- **Never omit half of a tool call.** `replacement: null` on a tool result alone would leave its `tool_use`
+  without a result, and providers reject the request. A single output that is not needed is replaced with
+  a one-line stub; `null` is only used for whole exchanges, which omit the assistant message with the call
+  and its results together.
+- **Never replace an assistant message's content.** A replacement turns the content into one text block,
+  which drops thinking, signatures and tool calls. Assistant messages are only omitted, as part of a whole
+  exchange.
 - **Steering messages move the span.** A user message sent during a run starts a new span. Tool results
   from before it are never candidates, now or later. That is the safe direction.
 - **`keepCitedFiles` is off by default.** Answers also name files to rule them out. In a live run, Claude's
   answer said `test/fixtures/entities.json` was *not* a usage, and the option kept 40 lines of noise from
   that file. See [JEV.md](JEV.md).
-- **Only the current run is edited.** Editing older runs would break the prompt cache from that point on,
-  for every later turn. Mid-run checkpoints edit the current run's older outputs (each judged once mid-run;
-  kept ones again at run end).
+- **Earlier runs are only edited as whole exchanges.** Editing single outputs of older runs would break the
+  prompt cache from that point on for little gain; an old exchange is omitted as a whole, once, when it is
+  unrelated to the current work, and only its first later request pays the rewrite.
 - **Don't distill from a `context` hook.** Output that varies between requests makes every request miss the
   cache.
 

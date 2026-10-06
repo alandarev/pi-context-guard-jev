@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { originalOutput, RECALL_MATCH_CHARS, RECALL_MAX_BYTES, RECALL_MAX_LINES, RECALL_MAX_PATTERN, recallText } from "../../src/recall.ts";
+import { omittedIdsFor, originalOutput, RECALL_MATCH_CHARS, RECALL_MAX_BYTES, RECALL_MAX_LINES, RECALL_MAX_PATTERN, recallText } from "../../src/recall.ts";
 
 const numbered = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n");
 
@@ -14,7 +14,7 @@ test("originalOutput returns the raw tool result text", () => {
 });
 
 test("originalOutput rejects anything that is not a tool result", () => {
-	assert.throws(() => originalOutput(undefined, "nope"), /No tool result with entry id nope/);
+	assert.throws(() => originalOutput(undefined, "nope"), /No tool result or omitted exchange with entry id nope/);
 	assert.throws(() => originalOutput({ id: "u", type: "message", message: { role: "user", content: "hi" } }, "u"), /No tool result/);
 	assert.throws(() => originalOutput({ id: "c", type: "custom" }, "c"), /\[context-guard\]/);
 });
@@ -90,4 +90,53 @@ test("recallText limits pattern length and matched line length", () => {
 	const long = `${"y".repeat(RECALL_MATCH_CHARS)}NEEDLE`;
 	assert.match(recallText(long, { pattern: "NEEDLE" }), /^No line of the original output/);
 	assert.match(recallText(`${"y".repeat(RECALL_MATCH_CHARS - 6)}NEEDLE`, { pattern: "NEEDLE$" }), /^1: y+NEEDLE$/);
+});
+
+test("originalOutput on an omitted exchange's prompt returns the whole exchange", () => {
+	const branch = [
+		{ id: "u1", type: "message", message: { role: "user", content: [{ type: "text", text: "Which clients retry?" }] } },
+		{ id: "a1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Searching." }, { type: "toolCall", name: "bash", arguments: { command: "rg retry" } }] } },
+		{ id: "e1", type: "context_edit", targetId: "a1", replacement: null },
+		{ id: "r1", type: "message", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "src/a.ts:3: retry" }] } },
+		{ id: "n1", type: "custom_message", customType: "subagent", content: "worker done" },
+		{ id: "a2", type: "message", message: { role: "assistant", content: [{ type: "text", text: "a.ts retries." }] } },
+		{ id: "u2", type: "message", message: { role: "user", content: [{ type: "text", text: "next" }] } },
+	];
+	const text = originalOutput(branch[0] as never, "u1", branch);
+	assert.equal(
+		text,
+		[
+			"## user",
+			"Which clients retry?",
+			"## assistant",
+			"Searching.",
+			'[tool call] bash {"command":"rg retry"}',
+			"## tool result (bash)",
+			"src/a.ts:3: retry",
+			"## custom message (subagent)",
+			"worker done",
+			"## assistant",
+			"a.ts retries.",
+		].join("\n"),
+	);
+	assert.equal(recallText(text, { pattern: "retr" }), "2: Which clients retry?\n5: [tool call] bash {\"command\":\"rg retry\"}\n7: src/a.ts:3: retry\n11: a.ts retries.");
+	// A user entry that is not on the branch: error.
+	assert.throws(() => originalOutput(branch[0] as never, "u1", []), /No tool result or omitted exchange/);
+});
+
+test("recall of an omitted exchange uses the record's exact list of omitted entries", () => {
+	const msg = (id: string, role: string, text: string) => ({ id, type: "message", message: { role, content: [{ type: "text", text }] } });
+	const branch: Record<string, unknown>[] = [
+		msg("u1", "user", "old prompt"),
+		msg("a1", "assistant", "first reply"),
+		msg("a2", "assistant", "second reply"),
+		{ id: "rec", type: "custom", customType: "context-guard", data: { v: 1, results: [{ kind: "exchange", entryId: "u1", outcome: "removed", omitted: ["a1"] }] } },
+		msg("u2", "user", "next"),
+	];
+	const ids = omittedIdsFor(branch as never, "u1", "context-guard");
+	assert.deepEqual(ids, ["a1"]);
+	assert.equal(originalOutput(branch[0] as never, "u1", branch as never, ids), "## user\nold prompt\n## assistant\nfirst reply");
+	// Without a record: everything up to the next user message.
+	assert.equal(originalOutput(branch[0] as never, "u1", branch as never), "## user\nold prompt\n## assistant\nfirst reply\n## assistant\nsecond reply");
+	assert.equal(omittedIdsFor(branch as never, "u2", "context-guard"), undefined);
 });

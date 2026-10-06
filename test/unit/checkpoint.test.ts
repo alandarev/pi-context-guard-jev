@@ -4,6 +4,7 @@ import {
 	anthropicRewriteChars,
 	BREAK_EVEN_FACTOR,
 	cacheAnchors,
+	exchangeMemo,
 	type WrittenEntry,
 	charsFrom,
 	collectCheckpoint,
@@ -318,4 +319,28 @@ test("anthropicRewriteChars: from the trusted read point, else from the question
 	// The same entry from another model, or expired: back to the question.
 	assert.equal(anthropicRewriteChars(entries, branch, [wrote("r2", "r2", { model: "x/y" })], MODEL, NOW, candidates), afterQuestion);
 	assert.equal(anthropicRewriteChars(entries, branch, [wrote("r2", "r2", { time: NOW - 10 * 60_000 })], MODEL, NOW, candidates), afterQuestion);
+});
+
+test("exchangeMemo: exchange results of the current run only; memoFromBranch ignores exchanges", () => {
+	const record = (results: Record<string, unknown>[], phase = "run-end") => ({ type: "custom", customType: "context-guard", data: { v: 1, phase, results } });
+	const branch = [
+		{ type: "message", id: "u1", message: { role: "user" } },
+		record([{ kind: "exchange", entryId: "x1", reason: "relevant" }]),
+		{ type: "message", id: "u2", message: { role: "user" } },
+		record([{ kind: "exchange", entryId: "x2", reason: "unrelated" }, { kind: "exchange", entryId: "x3", reason: "timeout" }], "mid-run"),
+		record([{ kind: "small", entryId: "s1", reason: "needed" }], "mid-run"),
+	];
+	assert.deepEqual([...exchangeMemo(branch, "context-guard")], ["x2"]);
+	assert.deepEqual([...memoFromBranch(branch, "context-guard")], ["s1"]);
+});
+
+test("anthropicRewriteChars: an edit before the question rewrites everything without a trusted read point", () => {
+	const entries = [user("old task", "u0"), assistant("old answer", [], "a0"), ...sized(4)];
+	const branch = branchOf(entries as never);
+	// u0 (an old exchange) comes before the current question: the question pin cannot be read.
+	assert.equal(anthropicRewriteChars(entries, branch, [], MODEL, NOW, new Set(["u0", "r2"])), contextChars(entries));
+	// Only outputs after the question: from the question.
+	assert.ok(anthropicRewriteChars(entries, branch, [], MODEL, NOW, new Set(["r2"])) < contextChars(entries));
+	// cacheAnchors with an edit before the question: no read point, write anchor only for tool results.
+	assert.deepEqual(cacheAnchors([...branch, edit("u0")], [wrote("r1", "r1")], MODEL, NOW), {});
 });

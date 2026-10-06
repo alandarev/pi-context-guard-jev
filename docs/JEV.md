@@ -172,6 +172,48 @@ files 78%, finished files 11%, superseded logs 8–36%. So `midRunChunkKeepThres
 same as run end, not lower: the brief proposed starting at 0.5 to keep more, and the probe showed that
 0.5 keeps nearly everything.
 
+### Old exchanges
+
+`buildExchangeRequest` asks one bool per exchange: "Is exchange_N still relevant to the current work
+(user_question and what the agent is doing for it)? Relevant means the agent may need its details: the
+same files, task, decisions or facts." Probed with `node test/e2e/probe-items.mjs` (2 repetitions):
+
+- three hand-written sessions (`test/e2e/probe-data/exchanges.json`) modeled on the shape of real long
+  main-thread sessions (a prompt, a final answer, tool-call labels, a size; 5 old exchanges each, mixed
+  relevant and unrelated to the current task);
+- the eligible exchanges at prompts 4 and 5 of two no-guard runs of the `topics` scenario (GPT and Claude,
+  public test repo): the first exchange (API retries) is unrelated to prompt 4 (`StatusBadge`) and relevant
+  to prompt 5 (its follow-up).
+
+| Label | P(relevant), 42 answers |
+|---|---|
+| relevant (16) | 0.47–0.96 (the weakest: "add a disk-usage alert for the backup volume" for a failing-backup task, 0.47–0.49; "how is contextTokens estimated with edits" for a compaction-settings task, 0.68) |
+| unrelated (26) | 0.03–0.10 |
+
+| Omit when P < | Accuracy | Relevant exchanges omitted | Unrelated exchanges omitted |
+|---|---|---|---|
+| 0.1 – 0.4 | 42/42 | 0/16 | 26/26 |
+| 0.5 | 41/42 | 1/16 | 26/26 |
+
+`exchangeOmitThreshold` is 0.2: omit only when Jev is clearly sure, with a wide margin to the weakest
+relevant exchange (0.47). The sessions are synthetic or generated, so real sessions may be less clear-cut;
+the margin is meant to absorb that. Repetitions agreed within 0.03.
+
+### Small outputs
+
+`buildSmallRequest` asks one bool per output ("will the agent still need the output in item_N?" mid-run;
+"does item_N contain anything that final_answer relies on, or that a likely follow-up would need?" at run
+end), with `superseded` shown when a later call made the output out of date.
+
+| Probe | Needed | Not needed |
+|---|---|---|
+| Two hand-written mid-run states on the `long` fixture's code (`test/e2e/probe-data/small.json`), 24 answers | 0.59–0.74 | 0.06–0.32 |
+| A `long` run of GPT-6 Luna (public fixture), mid-run at request 12 and at run end: reads of source files | not superseded: 0.48–0.68 | superseded (the file was edited afterwards): 0.19–0.41 |
+
+At 0.6 (the chunk threshold) 2 of 10 needed outputs would be dropped; at 0.45 none, and every superseded or
+unneeded output goes. `smallKeepThreshold` is 0.45. Without the `superseded` hint, Jev kept reads of files
+the agent had already edited (0.49–0.86), so the hint is part of the request.
+
 ## The final question set
 
 One request per segment, with these questions (exact wording in `src/decide.ts → buildRequest`):
@@ -198,6 +240,8 @@ answer did not quote but that a natural next question would need.
 | `noneThreshold` | 0.5 | Remove a whole output only if `none` wins and no chunk passes its own question |
 | `maxKeepRatio` | 0.6 | If most of the output is kept anyway, the saving does not justify the cache miss and the lost context |
 | `minResultChars` | 4,000 | Reads around 2.3k characters were never worth an edit |
+| `smallKeepThreshold` | 0.45 | Small-output probe above: needed outputs ≥ 0.48, superseded or unneeded ≤ 0.41 |
+| `exchangeOmitThreshold` | 0.2 | Exchange probe above: unrelated ≤ 0.10, relevant ≥ 0.47; omit only when Jev is clearly sure |
 | `midRunChunkKeepThreshold` | 0.6 | Checkpoint probe above: 0.5 kept 50–100% of everything; 0.6 kept in-use files and dropped finished ones |
 
 When an answer is missing, the request fails or the budget runs out, the extension keeps everything.

@@ -4,7 +4,7 @@
  */
 import vm from "node:vm";
 import { MARKER } from "./render.ts";
-import { type SourceEntryLike, textOf } from "./types.ts";
+import { type Block, type SourceEntryLike, textOf } from "./types.ts";
 
 export const RECALL_MAX_LINES = 2_000;
 export const RECALL_MAX_BYTES = 50 * 1024;
@@ -22,10 +22,69 @@ export interface RecallParams {
 	limit?: number;
 }
 
-export function originalOutput(entry: SourceEntryLike | undefined, entryId: string): string {
+type RecallBranchEntry = { id?: string; type?: string; message?: { role?: string; content?: unknown; toolName?: string } & Record<string, unknown>; customType?: string; content?: unknown };
+
+/**
+ * The original text behind a context-guard stub: a tool result's output, or, for the user prompt of an
+ * omitted exchange, the whole exchange from the branch (prompt, assistant texts, tool calls and results,
+ * custom messages) up to the next user message.
+ */
+export function originalOutput(entry: SourceEntryLike | undefined, entryId: string, branch: readonly RecallBranchEntry[] = [], omittedIds?: readonly string[]): string {
 	const message = entry?.type === "message" ? entry.message : undefined;
-	if (message?.role !== "toolResult") throw new Error(`No tool result with entry id ${entryId}. Use the id from a "${MARKER}" header.`);
-	return textOf(message);
+	if (message?.role === "toolResult") return textOf(message);
+	if (message?.role === "user") {
+		const start = branch.findIndex((e) => e.id === entryId);
+		if (start >= 0) return exchangeTranscript(branch, start, omittedIds);
+	}
+	throw new Error(`No tool result or omitted exchange with entry id ${entryId}. Use the id from a "${MARKER}" note.`);
+}
+
+/**
+ * The entry ids an omission removed, from the latest `context-guard` record that omitted the exchange
+ * starting at `entryId` (its `omitted` list). Undefined when no record has one.
+ */
+export function omittedIdsFor(branch: readonly (RecallBranchEntry & { data?: unknown })[], entryId: string, customType: string): string[] | undefined {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const e = branch[i];
+		if (e.type !== "custom" || e.customType !== customType) continue;
+		const results = (e.data as { results?: { kind?: string; entryId?: string; outcome?: string; omitted?: unknown }[] } | undefined)?.results ?? [];
+		const hit = results.find((r) => r.kind === "exchange" && r.entryId === entryId && r.outcome === "removed" && Array.isArray(r.omitted));
+		if (hit) return hit.omitted as string[];
+	}
+	return undefined;
+}
+
+/**
+ * Plain-text transcript of the exchange that starts at branch[start] (a user message): with
+ * `omittedIds`, exactly the prompt and those entries (what the omission removed); otherwise everything up
+ * to the next user message.
+ */
+export function exchangeTranscript(branch: readonly RecallBranchEntry[], start: number, omittedIds?: readonly string[]): string {
+	const out: string[] = [];
+	const listed = omittedIds ? new Set(omittedIds) : undefined;
+	for (let i = start; i < branch.length; i++) {
+		const e = branch[i];
+		if (listed) {
+			if (i > start && !listed.has(e.id ?? "")) continue;
+		} else if (i > start && e.type === "message" && e.message?.role === "user") break;
+		if (e.type === "custom_message") {
+			out.push(`## custom message (${e.customType ?? "custom"})`, textOf({ role: "custom", content: (e.content ?? "") as string }));
+			continue;
+		}
+		if (e.type !== "message" || !e.message) continue;
+		const m = e.message;
+		const content = m.content as string | Block[];
+		if (m.role === "user") out.push("## user", textOf({ role: "user", content }));
+		else if (m.role === "assistant") {
+			out.push("## assistant");
+			const text = textOf({ role: "assistant", content });
+			if (text.trim()) out.push(text);
+			if (Array.isArray(content)) {
+				for (const block of content) if (block.type === "toolCall") out.push(`[tool call] ${String(block.name)} ${JSON.stringify(block.arguments ?? {})}`);
+			}
+		} else if (m.role === "toolResult") out.push(`## tool result (${m.toolName ?? "tool"})`, textOf({ role: "toolResult", content }));
+	}
+	return out.join("\n");
 }
 
 export function recallText(original: string, params: Omit<RecallParams, "entryId">): string {

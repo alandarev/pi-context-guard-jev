@@ -390,7 +390,11 @@ export function anthropicRewriteChars(
 	for (const id of candidateIds) first = Math.min(first, position.get(id) ?? Number.POSITIVE_INFINITY);
 	const read = Number.isFinite(first) ? trustedReadPoint(branch, log, model, now, first) : undefined;
 	const readIndex = read ? projection.findIndex((entry) => entry.sourceEntry.id === read.id) : -1;
-	const from = readIndex >= 0 ? readIndex + 1 : findRunStart(projection) + 1;
+	if (readIndex >= 0) return contextChars(projection.slice(readIndex + 1));
+	// The question pin can be read only if every edit comes after it (an omitted old exchange comes before).
+	const runStart = findRunStart(projection);
+	const earliest = projection.findIndex((entry) => candidateIds.has(entry.sourceEntry.id));
+	const from = earliest >= 0 && earliest <= runStart ? 0 : runStart + 1;
 	return contextChars(projection.slice(Math.max(0, from)));
 }
 
@@ -402,9 +406,31 @@ export function memoFromBranch(branch: readonly BranchEntry[], customType: strin
 	const judged = new Set<string>();
 	for (const entry of branch) {
 		if (entry.type !== "custom" || entry.customType !== customType) continue;
-		const data = entry.data as { v?: number; phase?: string; results?: { entryId?: string; reason?: string }[] } | undefined;
+		const data = entry.data as { v?: number; phase?: string; results?: { entryId?: string; reason?: string; kind?: string }[] } | undefined;
 		if (data?.v !== 1 || data.phase !== "mid-run") continue;
-		for (const result of data.results ?? []) if (typeof result.entryId === "string" && wasJudged(result)) judged.add(result.entryId);
+		for (const result of data.results ?? []) {
+			if (typeof result.entryId === "string" && result.kind !== "exchange" && wasJudged(result)) judged.add(result.entryId);
+		}
+	}
+	return judged;
+}
+
+/**
+ * Old exchanges judged during the current run (records of any phase after the last user message on the
+ * branch). An exchange is judged again in a later run, against that run's work.
+ */
+export function exchangeMemo(branch: readonly BranchEntry[], customType: string): Set<string> {
+	let start = branch.length - 1;
+	while (start >= 0 && !(branch[start].type === "message" && branch[start].message?.role === "user")) start--;
+	const judged = new Set<string>();
+	for (const entry of branch.slice(start + 1)) {
+		if (entry.type !== "custom" || entry.customType !== customType) continue;
+		const data = entry.data as { v?: number; results?: { entryId?: string; reason?: string; kind?: string }[] } | undefined;
+		if (data?.v !== 1) continue;
+		for (const result of data.results ?? []) {
+			// A deferred omission (break-even) stays eligible: the exchange is judged again at a later pass.
+			if (result.kind === "exchange" && typeof result.entryId === "string" && wasJudged(result) && result.reason !== "deferred") judged.add(result.entryId);
+		}
 	}
 	return judged;
 }

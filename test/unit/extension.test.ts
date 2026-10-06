@@ -199,10 +199,10 @@ test("before_provider_request pins only for anthropic-messages models", () => {
 test("recall tool returns the original output", async () => {
 	const tool = extension.tools.get("recall")!.definition;
 	const raw = { id: "r1", type: "message", message: { role: "toolResult", content: [{ type: "text", text: "a\nfoo\nb" }] } };
-	const ctx = { sessionManager: { getEntry: (id: string) => (id === "r1" ? raw : undefined) } };
+	const ctx = { sessionManager: { getEntry: (id: string) => (id === "r1" ? raw : undefined), getBranch: () => [raw] } };
 	const result = (await tool.execute("call", { entryId: "r1", pattern: "foo" }, undefined, undefined, ctx)) as { content: { text: string }[] };
 	assert.equal(result.content[0].text, "2: foo");
-	await assert.rejects(() => tool.execute("call", { entryId: "zz" }, undefined, undefined, ctx), /No tool result with entry id zz/);
+	await assert.rejects(() => tool.execute("call", { entryId: "zz" }, undefined, undefined, ctx), /No tool result or omitted exchange with entry id zz/);
 });
 
 test("/guard off|on persists to the temp agent dir and pauses distillation", async () => {
@@ -279,11 +279,14 @@ function fakeSession(projected: ReturnType<typeof longRunEntries>) {
 		},
 		projection() {
 			const edits = new Map(branch.filter((e) => e.type === "context_edit").map((e) => [e.targetId, e.replacement]));
+			// Pi's shape: the latest edit wins; `replacement: null` keeps the entry with no messages.
 			return branch
-				.filter((e) => e.type === "message")
+				.filter((e) => e.type === "message" || e.type === "custom_message")
 				.map((e) => {
+					const message = e.type === "custom_message" ? { role: "custom", content: e.content } : e.message;
+					if (!edits.has(e.id)) return { sourceEntry: e, messages: [message] };
 					const replacement = edits.get(e.id);
-					return { sourceEntry: e, messages: [replacement ? { ...e.message, content: replacement.content } : e.message] };
+					return { sourceEntry: e, messages: replacement === null ? [] : [{ ...message, content: replacement.content }] };
 				});
 		},
 	};
@@ -639,4 +642,188 @@ test("message_end: no refresh from a short read or another model's response", as
 	const p1 = claudeAuthPayload(6);
 	send(p1);
 	assert.deepEqual(marks(p1), ["messages[2].content[1]", "c4", "c5"]);
+});
+
+// --- small outputs and old exchanges ------------------------------------------------------------
+
+/** Answers for every kind of request: chunk requests keep chunk_1; items and exchanges per `p`. */
+const itemAnswers = (p: (label: string, request: ClassifierRequest) => number) => (request: ClassifierRequest): ClassifierResponse => {
+	if (request.state.chunks) return fakeAnswers(request);
+	return {
+		answers: Object.fromEntries(Object.keys(request.questions).map((k) => [k, { type: "bool" as const, probability: p(k, request) }])),
+		stopReason: "stop",
+		usage: { input: 500, output: 1, totalTokens: 501, cost: { total: 0.0002 } },
+	};
+};
+
+/** Earlier exchanges (one with a tool call), then a finished current run with a small output. */
+function multiTopic() {
+	return [
+		user("Which clients retry on 503?", "u1"),
+		assistant("", [{ id: "x1", name: "bash", arguments: { command: "rg 503 src/api" } }], "a1"),
+		toolResult("x1", "bash", lines(40, "api"), "r1"),
+		assistant(`jobStatus and orderStatus.\n${lines(40, "d")}`, [], "a1b"),
+		user("Draft a README paragraph for StatusBar.", "u2"),
+		assistant(`Here it is.\n${lines(40, "d")}`, [], "a2"),
+		user("Count the 500s in the log.", "u3"),
+		assistant(`12.\n${lines(40, "d")}`, [], "a3"),
+		user("Where is StatusBadge used?", "u4"),
+		assistant("", [{ id: "x4", name: "bash", arguments: { command: "rg StatusBadge" } }], "a4"),
+		toolResult("x4", "bash", lines(15, "badge"), "r4"),
+		assistant("In 5 files.", [], "a4b"),
+	];
+}
+
+test("agent_before_settle: old exchanges and small outputs are judged with the final answer", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, exchangeBreakEven: false }));
+	const session = fakeSession(multiTopic() as never);
+	const { ctx, calls } = sessionCtx(session, itemAnswers((k, request) => (request.state.exchanges ? 0.05 : 0.1)));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	const result = (await handler("agent_before_settle")(
+		{ type: "agent_before_settle", outcome: "completed", entries: [], context: { contextEntries: session.projection() } },
+		ctx,
+	)) as { entries: Json[] };
+	// u1 is the only eligible exchange (u2, u3 are the 2 most recent before the current prompt u4).
+	assert.deepEqual(
+		result.entries.filter((e) => e.type === "context_edit").map((e) => [e.targetId, e.replacement === null ? null : e.replacement.content[0].text.slice(0, 45)]),
+		[
+			["r4", "[context-guard] Omitted the output of bash `r"],
+			["u1", "[context-guard] Omitted an earlier exchange j"],
+			["a1", null],
+			["r1", null],
+			["a1b", null],
+		],
+	);
+	const record = result.entries.at(-1)!;
+	assert.deepEqual(
+		record.data.results.map((r: Json) => [r.kind, r.entryId, r.outcome]),
+		[
+			["small", "r4", "removed"],
+			["exchange", "u1", "removed"],
+		],
+	);
+	assert.equal(calls.length, 2);
+	session.commit(result.entries);
+
+	// The next prompt: u1 is already omitted; u2 is eligible now and judged against the new prompt.
+	session.append([user("Back to the 503 clients: which also retry on 502?", "u5"), assistant("Checking.", [], "a5")]);
+	const next = (await handler("agent_before_settle")(
+		{ type: "agent_before_settle", outcome: "completed", entries: [], context: { contextEntries: session.projection() } },
+		ctx,
+	)) as { entries: Json[] };
+	assert.deepEqual(
+		next.entries.at(-1)!.data.results.map((r: Json) => [r.kind, r.entryId]),
+		[["exchange", "u2"]],
+	);
+	// recall on the stub returns the whole first exchange.
+	const tool = extension.tools.get("recall")!.definition;
+	const recalled = (await tool.execute("call", { entryId: "u1" }, undefined, undefined, { sessionManager: { getEntry: (id: string) => session.branch.find((e) => e.id === id), getBranch: () => session.branch } })) as { content: { text: string }[] };
+	assert.match(recalled.content[0].text, /^## user\nWhich clients retry on 503\?\n## assistant\n\[tool call\] bash \{"command":"rg 503 src\/api"\}\n## tool result \(bash\)\napi 1/);
+	// Recall shows exactly the entries the record lists as omitted, even if the raw history grew around them.
+	const listed = next.entries.length >= 0 && result.entries.at(-1)!.data.results.find((r: Json) => r.kind === "exchange").omitted;
+	assert.deepEqual(listed, ["a1", "r1", "a1b"]);
+	// The stats count the omitted exchange.
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+});
+
+test("agent_before_settle: pruneExchanges off and smallResultMinChars 0 leave them alone", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, pruneExchanges: false, smallResultMinChars: 0 }));
+	const session = fakeSession(multiTopic() as never);
+	const { ctx, calls } = sessionCtx(session, itemAnswers(() => 0.01));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	const result = await handler("agent_before_settle")(
+		{ type: "agent_before_settle", outcome: "completed", entries: [], context: { contextEntries: session.projection() } },
+		ctx,
+	);
+	assert.equal(result, undefined);
+	assert.equal(calls.length, 0);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+});
+
+test("turn_end: old exchanges join the batch; the break-even rule drops them when they do not pay off", async () => {
+	// Five old exchanges of ~18k chars each, then a current run with large outputs (longRunEntries shape).
+	const old = Array.from({ length: 5 }, (_, i) => [user(`old task ${i}`, `ou${i}`), assistant("", [{ id: `oc${i}`, name: "bash", arguments: { command: `old ${i}` } }], `oa${i}`), toolResult(`oc${i}`, "bash", lines(300, `old${i}`), `or${i}`), assistant(`done ${i}`, [], `ob${i}`)]).flat();
+	const session = fakeSession([...old, ...longRunEntries(9).slice(2)] as never);
+	const { ctx, calls } = sessionCtx(session, itemAnswers(() => 0.05));
+	// Break-even off: the batch has the 3 eligible exchanges (2 recent kept) and the large outputs.
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, midRunBreakEven: false }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	const forced = (await handler("turn_end")(turnEndOf(session), ctx)) as { entries: Json[] };
+	const kinds = (entries: Json[]) => entries.at(-1)!.data.results.map((r: Json) => `${r.kind}:${r.entryId}`);
+	assert.deepEqual(kinds(forced.entries), ["large:r1", "large:r2", "large:r3", "large:r4", "exchange:ou0", "exchange:ou1", "exchange:ou2"]);
+	// Break-even on: the exchanges move the rewrite to the start of the context and are dropped from the batch.
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	const before = calls.length;
+	const result = await handler("turn_end")(turnEndOf(session), ctx);
+	assert.equal(result, undefined);
+	assert.equal(calls.length, before);
+});
+
+// --- run-end exchange break-even ------------------------------------------------------------
+
+/** An old exchange with `turns` tool calls (so the session has many requests) and about `chars` of output. */
+function oldExchange(i: number, turns: number) {
+	const out: ReturnType<typeof user>[] = [user(`old task ${i}: explain module ${i}`, `ou${i}`)];
+	for (let t = 0; t < turns; t++) {
+		out.push(assistant("", [{ id: `oc${i}_${t}`, name: "bash", arguments: { command: `cat part${t}` } }], `oa${i}_${t}`));
+		out.push(toolResult(`oc${i}_${t}`, "bash", "y".repeat(300), `or${i}_${t}`));
+	}
+	out.push(assistant(`Module ${i} explained.\n${lines(20, `m${i}`)}`, [], `ob${i}`));
+	return out;
+}
+const recent = () => [user("recent 1", "rcu1"), assistant(`ok\n${lines(40, "r1")}`, [], "rca1"), user("recent 2", "rcu2"), assistant(`ok\n${lines(40, "r2")}`, [], "rca2")];
+const exchangeResults = (result: unknown) => ((result as { entries: Json[] } | undefined)?.entries.at(-1)?.data.results ?? []).filter((r: Json) => r.kind === "exchange").map((r: Json) => `${r.entryId}:${r.outcome}:${r.reason}`);
+const settle = async (session: ReturnType<typeof fakeSession>, ctx: Json) =>
+	handler("agent_before_settle")({ type: "agent_before_settle", outcome: "completed", entries: [], context: { contextEntries: session.projection() } }, ctx);
+const anthropicModel = { api: "anthropic-messages", provider: "anthropic", id: "claude-sonnet-5-5" };
+
+test("run-end break-even: a small omission is deferred, then the accumulated batch pays off", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, smallResultMinChars: 0 }));
+	// Exchange ou0 saves ~5k chars: below exchangeMinSavingChars (8,000), so it waits.
+	const session = fakeSession([...oldExchange(0, 12), ...recent(), user("current task", "cu"), assistant("done", [], "ca")] as never);
+	const { ctx } = sessionCtx(session, itemAnswers(() => 0.05));
+	Object.assign(ctx, { model: anthropicModel });
+	await handler("session_start")({ type: "session_start" }, ctx);
+	const first = await settle(session, ctx);
+	assert.deepEqual(exchangeResults(first), ["ou0:kept:deferred"]);
+	assert.equal(((first as { entries: Json[] }).entries ?? []).filter((e) => e.type === "context_edit").length, 0);
+	session.commit((first as { entries: Json[] }).entries);
+	// Next prompt: ou0 and rcu1 are eligible now (rcu2 and the previous current task are recent); together they pay off.
+	session.append([...oldExchange(1, 12), user("next task", "nu"), assistant("done", [], "na")] as never);
+	const second = await settle(session, ctx);
+	assert.deepEqual(exchangeResults(second), ["ou0:removed:unrelated", "rcu1:removed:unrelated", "rcu2:removed:unrelated"]);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+});
+
+test("run-end break-even: a big early exchange in a short session does not pay off", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, smallResultMinChars: 0 }));
+	// One old exchange of ~20k chars, but only a handful of requests in the session.
+	const big = [user("old big task", "bu"), assistant("", [{ id: "bc", name: "bash", arguments: { command: "cat big" } }], "ba"), toolResult("bc", "bash", "z".repeat(20_000), "br"), assistant(`done\n${lines(10, "b")}`, [], "bb")];
+	const session = fakeSession([...big, ...recent(), user("current", "cu"), assistant("done", [], "ca")] as never);
+	const { ctx } = sessionCtx(session, itemAnswers(() => 0.05));
+	Object.assign(ctx, { model: anthropicModel });
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.deepEqual(exchangeResults(await settle(session, ctx)), ["bu:kept:deferred"]);
+	// exchangeBreakEven false: always omitted.
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, smallResultMinChars: 0, exchangeBreakEven: false }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.deepEqual(exchangeResults(await settle(session, ctx)), ["bu:removed:unrelated"]);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+});
+
+test("run-end break-even: on OpenAI Codex exchanges ride along when the pass edits anything else", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	const codex = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-6-luna" };
+	// multiTopic's current run has a small output (r4) that is dropped: the cache misses anyway.
+	const session = fakeSession(multiTopic() as never);
+	const { ctx } = sessionCtx(session, itemAnswers(() => 0.05));
+	Object.assign(ctx, { model: codex });
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.deepEqual(exchangeResults(await settle(session, ctx)), ["u1:removed:unrelated"]);
+	// Without other edits (the small output is needed), the omission must pay off on its own.
+	const keepSmall = sessionCtx(session, itemAnswers((k) => (k.startsWith("item_") ? 0.9 : 0.05)));
+	Object.assign(keepSmall.ctx, { model: codex });
+	assert.deepEqual(exchangeResults(await settle(session, keepSmall.ctx)), ["u1:kept:deferred"]);
 });

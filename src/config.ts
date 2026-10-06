@@ -63,6 +63,23 @@ export interface GuardConfig {
 	midRunChunkKeepThreshold: number;
 	/** Skip a checkpoint unless its one-time prompt-cache rewrite is likely to pay off (docs/CACHE.md). */
 	midRunBreakEven: boolean;
+	/** Tool results from this size up to `minResultChars` are judged as whole items (0 turns this off). */
+	smallResultMinChars: number;
+	/** Keep a small output when P(still needed) reaches this. */
+	smallKeepThreshold: number;
+	/** Omit old exchanges judged unrelated to the current work. */
+	pruneExchanges: boolean;
+	/** The last this many exchanges before the current prompt are never omitted. */
+	keepRecentExchanges: number;
+	/** Omit an exchange only when P(still relevant) is below this. */
+	exchangeOmitThreshold: number;
+	/**
+	 * Gate exchange omission at run end by the break-even rule (and `exchangeMinSavingChars`); deferred
+	 * exchanges stay eligible and accumulate. `false` always omits unrelated exchanges.
+	 */
+	exchangeBreakEven: boolean;
+	/** A pass omits exchanges only if they save at least this many characters together (when that costs a cache rewrite). */
+	exchangeMinSavingChars: number;
 }
 
 export const DEFAULT_CONFIG: GuardConfig = {
@@ -90,6 +107,13 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	midRunBatchCharsOpenAI: 60_000,
 	midRunChunkKeepThreshold: 0.6,
 	midRunBreakEven: true,
+	smallResultMinChars: 400,
+	smallKeepThreshold: 0.45,
+	pruneExchanges: true,
+	keepRecentExchanges: 2,
+	exchangeOmitThreshold: 0.2,
+	exchangeBreakEven: true,
+	exchangeMinSavingChars: 8_000,
 };
 
 const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
@@ -109,9 +133,14 @@ const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
 	midRunBatchChars: [0, 10_000_000],
 	midRunBatchCharsOpenAI: [0, 10_000_000],
 	midRunChunkKeepThreshold: [0, 1],
+	smallResultMinChars: [0, 10_000_000],
+	smallKeepThreshold: [0, 1],
+	keepRecentExchanges: [0, 100],
+	exchangeOmitThreshold: [0, 1],
+	exchangeMinSavingChars: [0, 10_000_000],
 };
 
-const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges", "midRunMinAgeTurns", "midRunBatchChars", "midRunBatchCharsOpenAI"]);
+const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges", "midRunMinAgeTurns", "midRunBatchChars", "midRunBatchCharsOpenAI", "smallResultMinChars", "keepRecentExchanges", "exchangeMinSavingChars"]);
 
 /** Merge untrusted JSON over the defaults, keeping only well-typed, in-range values. */
 export function normalizeConfig(raw: unknown): GuardConfig {

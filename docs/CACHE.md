@@ -218,6 +218,32 @@ about as long as it has run so far. In the measured Claude runs (8–14 requests
 checkpoint; in the GPT runs (26–37 requests) it allowed one or two. Turn it off to checkpoint purely for
 context room.
 
+## Old exchanges
+
+An omitted exchange comes before the current question, so the first request after it cannot read the
+question's cache entry: that prefix contains the edit. `cacheAnchors` handles this like any other edit: the
+read point is the latest trusted logged entry before the earliest edited entry, and the question pin is
+still placed (it writes a new entry for the requests that follow). Without such an entry, only the tools and
+system prompt are read. The break-even estimate (`anthropicRewriteChars`) follows the same rule: with an edit
+at or before the question and no trusted read point, the rewrite is the whole context.
+
+Measured (`topics` scenario, Claude Sonnet 5.5, first request of prompt 5 after the first exchange was
+omitted at the end of prompt 4 with `exchangeBreakEven: false`): cacheRead 1,760 (tools and system),
+cacheWrite 6,280, against cacheRead 12,376 and cacheWrite 438 with the guard off. With the default gate the
+omission was deferred and prompt 5 read 11,049 tokens from cache. On OpenAI Codex any edit makes the next
+request read at most the 2,560-token stable prefix (see above).
+
+So each omission costs one rewrite of everything after the omitted exchange on the next request (Pi's
+default `cacheWarming: "streaming"` keeps the cache warm between prompts that come within the TTL) and saves
+the exchange on every request after it. At run end, omissions therefore go through a break-even gate
+(`exchangeBreakEven`): their marginal rewrite (beyond what the pass's other edits rewrite anyway) must pay
+off over as many later requests as the session has had so far, and they must save at least
+`exchangeMinSavingChars` (8,000 characters); otherwise they wait and accumulate. On OpenAI Codex a pass that
+edits anything else already costs the whole context, so exchange omissions in that pass are free. Mid-run, exchanges join the checkpoint batch only when the batch with them pays off; their early
+position makes the rewrite most of the context, so with factor 16 the batch must reach about
+1/16 of the context per turn so far (for example, old exchanges that are half of the context pay off from
+about turn 32).
+
 ## Cost model
 
 All units are input-token equivalents, with a 5-minute TTL (write 1.25×, read 0.1×).

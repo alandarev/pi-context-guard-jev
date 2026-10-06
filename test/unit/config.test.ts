@@ -144,3 +144,15 @@ test("mid-run settings: defaults and validation", () => {
 	);
 	assert.equal(normalizeConfig({ midRunMinAgeTurns: 2.5 }).midRunMinAgeTurns, 4);
 });
+
+test("item settings: defaults and validation", () => {
+	assert.equal(DEFAULT_CONFIG.smallResultMinChars, 400);
+	assert.equal(DEFAULT_CONFIG.smallKeepThreshold, 0.45);
+	assert.equal(DEFAULT_CONFIG.pruneExchanges, true);
+	assert.equal(DEFAULT_CONFIG.keepRecentExchanges, 2);
+	assert.equal(DEFAULT_CONFIG.exchangeOmitThreshold, 0.2);
+	const ok = normalizeConfig({ smallResultMinChars: 0, smallKeepThreshold: 0.5, pruneExchanges: false, keepRecentExchanges: 5, exchangeOmitThreshold: 0.1 });
+	assert.deepEqual([ok.smallResultMinChars, ok.smallKeepThreshold, ok.pruneExchanges, ok.keepRecentExchanges, ok.exchangeOmitThreshold], [0, 0.5, false, 5, 0.1]);
+	const bad = normalizeConfig({ smallResultMinChars: 1.5, smallKeepThreshold: 2, pruneExchanges: "yes", keepRecentExchanges: -1, exchangeOmitThreshold: -0.1 });
+	assert.deepEqual([bad.smallResultMinChars, bad.smallKeepThreshold, bad.pruneExchanges, bad.keepRecentExchanges, bad.exchangeOmitThreshold], [400, 0.45, true, 2, 0.2]);
+});

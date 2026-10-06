@@ -14,6 +14,7 @@ These need Node ≥ 22.18, which runs the `.ts` files directly. There is no netw
 | File | Covers |
 |---|---|
 | `checkpoint.test.ts` | Mid-run eligibility and age, the memo and candidate rules, later calls, notes, superseded detection (edits, re-reads, reruns), cache anchors (read point only from logged entries of the same model within the TTL, invalidated by later edits and compaction, parallel-call batches never split, early return without pending edits), refresh on read-through (same model, cacheRead clearly past the entry, unchanged prefix; trusted after 5 minutes once refreshed), the run baseline, the Anthropic rewrite estimate (from the trusted read point, else from the question), pending edits, the memo from records, the break-even rule, context size with summaries |
+| `items.test.ts` | Small outputs (size window, candidate rules, age, memo, stub length, superseded), exchange spans (custom messages, completed exchanges only, the current run and the recent exchanges never touched, already omitted, memo; images, foreign edits and foreign omissions skipped, our own markers allowed; system, `!` and custom messages; a compaction that cut an exchange; minimum size), stubs and edits, the small and exchange requests in both phases, batching, the shared limiter, `judgeItems` (parallel limit, failures keep, time budget), `processItems` (stubs, omissions, records with kinds, one `concurrency` across all kinds) |
 | `run.test.ts` | Run span (including image-only prompts), question/answer/notes, candidate rules (errors, images, excluded tools, short, already-distilled and other-extension-edited results), steering messages; history (last N exchanges, first request, compaction/branch summaries, image-only and steering prompts, clipping, `historyExchanges` 0) |
 | `chunk.test.ts` | grep detection, grouping by file, context lines and `--`, `-digits-` file names, split/merge rules, plain-text windows, segment limits |
 | `decide.test.ts` | Checkpoint request shape and wording; run-end request shape, with and without `earlier_conversation` (state order, omitted parts, history wording vs. the unchanged single-run wording); the decision order (error, missing answers, `keep_whole`, strong/weak `whole`, chunks, `none`); `citedFiles` |
@@ -41,7 +42,15 @@ the first request after edits a write anchor, and a read point only at an entry 
 (also on a warming replay); a read point after run-end edits; and no read point for another model, after
 the TTL (mocked clock), after a reload, for an anchor dropped for the budget, or for history made with
 pinning off. Through `message_end` it checks that a response that read through a logged entry keeps it
-usable past 5 minutes, and that a short read or another model's response does not.
+usable past 5 minutes, and that a short read or another model's response does not. For whole items it
+checks that run end omits an unrelated old exchange (stub on the prompt, `null` for the rest) and stubs a
+small output, that the next run judges the next eligible exchange, that `recall` on the stub returns the
+whole exchange, that `pruneExchanges: false` and `smallResultMinChars: 0` turn them off, and that the
+break-even rule drops exchanges from a checkpoint batch that would not pay off with them. The run-end
+exchange gate: a small omission is deferred and the accumulated batch is omitted at a later run end; a big
+early exchange in a short session is deferred, and omitted with `exchangeBreakEven: false`; on OpenAI Codex
+an exchange rides along when the pass edits something else and is deferred when it does not. The fake
+session uses Pi's projection shape (an omitted entry stays with no messages).
 
 Test through Pi's loader (or `pi -e`), not a plain Node import of the extension. Plain Node imports of
 `@earendil-works/pi-coding-agent` can fail with `ERR_PACKAGE_PATH_NOT_EXPORTED`, even though Pi loads the
@@ -53,7 +62,7 @@ This uses a real Pi, a real main model and real Jev requests. **It costs money o
 main-model requests per turn, plus a few Jev requests (under $0.001 per distilled run).
 
 ```bash
-node test/e2e/run-e2e.mjs --model <provider/id> [--ext <path>]... [--scenario badge|sequential|history|long] \
+node test/e2e/run-e2e.mjs --model <provider/id> [--ext <path>]... [--scenario badge|sequential|history|long|topics] \
   [--config '<JSON>'] [--no-guard] [--turns N] [--thinking level]
 ```
 
@@ -61,7 +70,7 @@ node test/e2e/run-e2e.mjs --model <provider/id> [--ext <path>]... [--scenario ba
 |---|---|---|
 | `--model` | (required) | Main model, e.g. `openai-codex/gpt-6-luna` or `anthropic/claude-sonnet-5-5` |
 | `--ext` | none | Extra extension to load; can be repeated (e.g. an auth extension) |
-| `--scenario` | `badge` | `badge`: 3 turns about `StatusBadge` usages. `sequential`: 2 turns with 10+ sequential tool calls, for the question pin. `history`: 3 turns for the earlier-conversation feature. `long`: one autonomous "fix all failing tests" run, for mid-run checkpoints (both below). |
+| `--scenario` | `badge` | `badge`: 3 turns about `StatusBadge` usages. `sequential`: 2 turns with 10+ sequential tool calls, for the question pin. `history`: 3 turns for the earlier-conversation feature. `long`: one autonomous "fix all failing tests" run, for mid-run checkpoints. `topics`: 5 prompts on different topics, the last a follow-up on the first, for old exchanges (both below; use `--turns 5`). |
 | `--config` | `{}` | context-guard settings for this run, e.g. `'{"pinAnthropicCache":false}'` |
 | `--no-guard` | off | Control run without context-guard |
 | `--turns` | `3` | Turns to run (capped by the scenario) |
@@ -126,6 +135,24 @@ cacheRead, cacheWrite), whether the suite is green, `recall` calls, and repeated
 outputs searched again). Results are in the README ("Long autonomous runs") and in
 [CACHE.md](CACHE.md#mid-run-checkpoints).
 
+**`topics` scenario.** Five prompts in the generated StatusBadge repo: which API clients retry on 503; a
+README paragraph for `StatusBar`; a count of HTTP 500 log lines; where `StatusBadge` is used; and "back to
+the API clients that retry on 503: which of them also retry on 502?". The summary gets a `topics` block:
+the context of each prompt's first request and its usage, the exchange results (phase, prompt, outcome,
+P), the small-output results, the last prompt's tool calls and whether it used `recall`, and whether its
+answer names exactly the clients whose file has both `=== 503` and `=== 502` (a crude check: it fails on
+answers that also list clients to say they do not qualify). Results are in the README (example D) and in
+[CACHE.md](CACHE.md#old-exchanges).
+
+**API-shape probe.** `CG_OMIT_AT_TURN=2 node test/e2e/run-e2e.mjs --model … --no-guard --ext
+test/e2e/omit-probe.ts` omits the session's first exchange after turn 2 the way the guard does, so turn 3
+sends a stub user message right before the next user message, without the omitted assistant and
+tool-result messages. Both GPT-6 Luna and Claude Sonnet 5.5 (`pi-claude-auth`) accepted it and answered.
+
+**Whole-item probe.** `node test/e2e/probe-items.mjs [--reps 2] [--sessions <topics no-guard run dir>]…`
+sends the hand-written exchanges and small outputs in `test/e2e/probe-data/` (and the `topics` exchanges)
+to Jev and prints P per item and the accuracy per threshold (results in [JEV.md](JEV.md#old-exchanges)).
+
 **Anthropic TTL experiment.** `node test/e2e/ttl-probe.mjs [--arms refresh,control,ttl1h,idle,idle1h]`
 runs `test/e2e/ttl-probe.ts` with Claude: does a cache entry stay alive while later requests read a longer
 prefix, and does it expire when nothing reads it for 6 minutes? About 9 minutes and roughly $0.9 at list price for all five arms.
@@ -180,6 +207,7 @@ node test/e2e/run-e2e.mjs --model anthropic/claude-sonnet-5-5 --ext ~/.pi/agent/
 | GPT-6 Luna, badge, with history (default) | 36,113 → ~2.3k chars; 9/9 checks pass (a run in parallel with 4 others had one OpenAI cache miss on turn 2: 8/9) |
 | GPT-6 Luna / Claude Sonnet 5.5, history on / off | See [JEV.md](JEV.md#earlier-conversation-historyexchanges): 2 rounds × 4 runs |
 | GPT-6 Luna / Claude Sonnet 5.5, long (mid-run checkpoints) | See the README, "Long autonomous runs"; all suites green, no `recall` |
+| GPT-6 Luna / Claude Sonnet 5.5, topics, guard on / off | See the README, example D |
 
 See [CACHE.md](CACHE.md) for what the cache numbers mean.
 

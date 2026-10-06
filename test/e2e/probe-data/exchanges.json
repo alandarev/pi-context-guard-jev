@@ -1,0 +1,47 @@
+{
+  "_note": "Synthetic sessions modeled on the shape of real long main-thread sessions (prompt, final answer, tool-call labels, size). Written by hand; no real session content. label = what a careful reader would decide for the current work.",
+  "sessions": [
+    {
+      "name": "pi-package",
+      "current": {
+        "question": "Raise the compaction reserveTokens to 30000 for the opus model only, using a per-model override in my settings, and check that Pi actually applies it.",
+        "latest": "Reading the settings manager to see how modelOverrides are resolved."
+      },
+      "exchanges": [
+        { "label": "relevant", "prompt": "Where does Pi decide to auto-compact the context, and which thresholds or settings control it? Answer with file:line references.", "answer": "Auto-compaction is decided by shouldCompact() in dist/core/compaction/compaction.js:168: it fires when contextTokens > contextWindow - reserveTokens. The settings are compaction.enabled (default true), compaction.reserveTokens (16384) and compaction.keepRecentTokens (20000), read in dist/core/settings-manager.js:597-636; per-model overrides live under compaction.modelOverrides.", "toolCalls": ["bash `rg -n -i compact dist docs`", "read dist/core/compaction/compaction.js", "read dist/core/settings-manager.js"], "messages": 9, "chars": 61000 },
+        { "label": "unrelated", "prompt": "The TUI footer flickers whenever an extension updates its status text. Find out why.", "answer": "The footer is re-rendered on every setStatus call because FooterComponent.invalidate() clears the whole line cache (dist/modes/interactive/components/footer.js:88). Throttling setStatus in the extension, or diffing before invalidate, removes the flicker.", "toolCalls": ["bash `rg -n setStatus dist/modes`", "read dist/modes/interactive/components/footer.js", "read dist/modes/interactive/interactive-mode.js"], "messages": 11, "chars": 48000 },
+        { "label": "unrelated", "prompt": "Which themes does Pi ship with, and how do I switch between them?", "answer": "Pi ships dark and light themes (dist/modes/interactive/theme/*.json). Switch with /theme or set \"theme\" in ~/.pi/agent/settings.json; custom themes go in ~/.pi/agent/themes.", "toolCalls": ["bash `ls dist/modes/interactive/theme`", "read docs/themes.md"], "messages": 5, "chars": 9000 },
+        { "label": "relevant", "prompt": "When a context_edit is present, how does Pi estimate contextTokens for the compaction threshold?", "answer": "estimateProjectedContextTokens() in dist/core/compaction/compaction.js:61 rebuilds the projection with the edits applied and ignores usage captured before the latest edit, so the threshold check sees the edited size.", "toolCalls": ["bash `rg -n estimateProjectedContextTokens dist`", "read dist/core/compaction/compaction.js"], "messages": 6, "chars": 22000 },
+        { "label": "unrelated", "prompt": "Write a commit message for the changes in my dotfiles repo (zsh aliases and the new tmux status line).", "answer": "\"zsh: add git and docker aliases; tmux: two-segment status line with session name and clock\" with a short body listing the alias groups.", "toolCalls": ["bash `git -C ~/dotfiles diff --stat`", "bash `git -C ~/dotfiles diff`"], "messages": 5, "chars": 14000 }
+      ]
+    },
+    {
+      "name": "web-app",
+      "current": {
+        "question": "Add retry with exponential backoff to the payments API client, the same way the orders client does it, and add a test.",
+        "latest": "Opening src/api/payments.ts to add the retry wrapper."
+      },
+      "exchanges": [
+        { "label": "relevant", "prompt": "How does the orders API client handle retries and timeouts?", "answer": "src/api/orders.ts wraps every request in withRetry() from src/lib/http/retry.ts: up to 3 attempts on 429/502/503 with exponential backoff (250 ms base, jitter), and a 10 s AbortSignal timeout per attempt.", "toolCalls": ["read src/api/orders.ts", "read src/lib/http/retry.ts"], "messages": 6, "chars": 18000 },
+        { "label": "unrelated", "prompt": "Fix the flaky date-picker test in the settings page.", "answer": "The test depended on the local timezone; it now freezes time with vi.setSystemTime('2026-03-01T12:00:00Z') and passes 50/50 runs.", "toolCalls": ["bash `npm test -- settings`", "read src/pages/settings/DatePicker.test.tsx", "edit src/pages/settings/DatePicker.test.tsx", "bash `npm test -- settings`"], "messages": 12, "chars": 52000 },
+        { "label": "unrelated", "prompt": "Update the CI badge in the README to point at the new GitHub Actions workflow.", "answer": "README.md line 3 now links to actions/workflows/ci.yml.", "toolCalls": ["read README.md", "edit README.md"], "messages": 5, "chars": 6000 },
+        { "label": "relevant", "prompt": "Which HTTP wrapper do all our API clients use, and where is the base URL configured?", "answer": "All clients call request() from src/lib/http/client.ts, which reads the base URL from src/config/env.ts (API_BASE_URL) and adds auth headers.", "toolCalls": ["bash `rg -n \"from '../lib/http\" src/api`", "read src/lib/http/client.ts", "read src/config/env.ts"], "messages": 7, "chars": 21000 },
+        { "label": "unrelated", "prompt": "Rename the userStatus reducer action types to past tense.", "answer": "Renamed user/activate → user/activated etc. in src/store/userStatusReducer.ts and the 4 dispatch sites; tests pass.", "toolCalls": ["bash `rg -n \"user/\" src`", "edit src/store/userStatusReducer.ts", "edit src/pages/admin/UserTable.tsx", "bash `npm test`"], "messages": 14, "chars": 40000 }
+      ]
+    },
+    {
+      "name": "infra",
+      "current": {
+        "question": "The nightly postgres backup failed again last night. Check the cron logs and fix the retention cleanup script.",
+        "latest": "Reading /var/log/cron-backup.log for last night's run."
+      },
+      "exchanges": [
+        { "label": "relevant", "prompt": "Set up a nightly backup cron job for the postgres database with 7-day retention.", "answer": "Added /etc/cron.d/pg-backup (02:30 daily) running /usr/local/bin/pg-backup.sh, which pg_dumps to /srv/backups and deletes dumps older than 7 days with find -mtime +7.", "toolCalls": ["bash `crontab -l`", "write /usr/local/bin/pg-backup.sh", "write /etc/cron.d/pg-backup", "bash `sudo -u postgres /usr/local/bin/pg-backup.sh`"], "messages": 13, "chars": 30000 },
+        { "label": "unrelated", "prompt": "Why does nginx return 502 for /api?", "answer": "The upstream pointed at 127.0.0.1:8080 but the app listens on 8081 since the last deploy; fixed proxy_pass in /etc/nginx/sites-enabled/app and reloaded.", "toolCalls": ["bash `curl -I localhost/api`", "read /etc/nginx/sites-enabled/app", "edit /etc/nginx/sites-enabled/app", "bash `sudo nginx -t && sudo systemctl reload nginx`"], "messages": 12, "chars": 26000 },
+        { "label": "unrelated", "prompt": "Explain the difference between our staging and production docker-compose files.", "answer": "Production adds resource limits, restart: always, the TLS proxy and external volumes; staging mounts source code and runs with DEBUG=1.", "toolCalls": ["read docker-compose.staging.yml", "read docker-compose.prod.yml"], "messages": 5, "chars": 17000 },
+        { "label": "relevant", "prompt": "Add a disk-usage alert for the backup volume.", "answer": "Added /etc/cron.d/backup-disk-alert: checks df /srv/backups every hour and mails ops when usage passes 85%.", "toolCalls": ["bash `df -h /srv/backups`", "write /etc/cron.d/backup-disk-alert"], "messages": 6, "chars": 8000 },
+        { "label": "unrelated", "prompt": "Translate the signup form's error messages to German.", "answer": "Added de.json with the 12 signup error strings and wired it into src/i18n/index.ts.", "toolCalls": ["read src/i18n/en.json", "write src/i18n/de.json", "edit src/i18n/index.ts"], "messages": 8, "chars": 12000 }
+      ]
+    }
+  ]
+}

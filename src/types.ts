@@ -63,6 +63,13 @@ export interface ContextEditDraft {
 	replacement: { content: { type: "text"; text: string }[] };
 }
 
+/** A context edit that omits its target from model context (`replacement: null`). */
+export interface OmitDraft {
+	type: "context_edit";
+	targetId: string;
+	replacement: null;
+}
+
 /** Draft accepted by `agent_before_settle` (Pi's `CustomEntryDraft`). */
 export interface CustomDraft {
 	type: "custom";

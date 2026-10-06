@@ -74,6 +74,14 @@ SCENARIOS.long = [
 		"Fix one bug at a time and run the full suite with plain `npm test` (no pipes, filters, head or tail) after every single fix. " +
 		"Don't ask me anything; don't stop until npm test is green.",
 ];
+// Several unrelated tasks in one session, then a follow-up on the first (old-exchange pruning).
+SCENARIOS.topics = [
+	"Which API clients in src/api retry on HTTP 503? Answer with file:line references.",
+	"Draft a short README paragraph that documents the StatusBar component in src/components/StatusBar.tsx. Show me the text; don't edit any files.",
+	"How many lines in logs/worker.log have http_status=500, and which workers logged them? Use a command.",
+	"Where is the StatusBadge component used? Answer with file:line references.",
+	"Back to the API clients that retry on 503: which of them also retry on HTTP 502? Answer with file:line references.",
+];
 const PROMPTS = SCENARIOS[scenario];
 if (!PROMPTS) {
 	console.error(`unknown scenario ${scenario}`);
@@ -145,7 +153,7 @@ turnEntries.forEach((list, i) => {
 	const edits = list.filter((e) => e.type === "context_edit");
 	const records = list.filter((e) => e.type === "custom" && e.customType === "context-guard").map((e) => e.data);
 	const requests = (capTurns[i] ?? []).filter((r) => r.kind === "request");
-	const usage = assistants.map((m) => ({ input: m.usage?.input, cacheRead: m.usage?.cacheRead, cacheWrite: m.usage?.cacheWrite, output: m.usage?.output }));
+	const usage = assistants.map((m) => ({ input: m.usage?.input, cacheRead: m.usage?.cacheRead, cacheWrite: m.usage?.cacheWrite, output: m.usage?.output, cost: m.usage?.cost?.total }));
 	summary.turns.push({
 		prompt: turns[i]?.prompt,
 		seconds: turns[i]?.seconds,
@@ -303,6 +311,33 @@ if (scenario === "long") {
 		}
 	}
 }
+if (scenario === "topics") {
+	const apiDir = join(repo, "src/api");
+	const clients = readdirSync(apiDir).map((f) => f.replace(/\.ts$/, ""));
+	const both = clients.filter((c) => {
+		const text = readFileSync(join(apiDir, `${c}.ts`), "utf8");
+		return text.includes("=== 503") && text.includes("=== 502");
+	});
+	const last = summary.turns.at(-1);
+	const answer = (last?.answer ?? "").toLowerCase();
+	const named = clients.filter((c) => answer.includes(c.toLowerCase()));
+	const exchangeResults = entries
+		.filter((e) => e.type === "custom" && e.customType === "context-guard")
+		.flatMap((e) => e.data.results.filter((r) => r.kind === "exchange").map((r) => ({ phase: e.data.phase ?? "run-end", label: r.label, outcome: r.outcome, p: r.jev?.[0] })));
+	summary.topics = {
+		contextPerTurn: summary.turns.map((t) => t.usage[0] && (t.usage[0].input ?? 0) + (t.usage[0].cacheRead ?? 0) + (t.usage[0].cacheWrite ?? 0)),
+		firstRequestUsage: summary.turns.map((t) => t.usage[0]),
+		exchanges: exchangeResults,
+		smallItems: entries.filter((e) => e.type === "custom" && e.customType === "context-guard").flatMap((e) => e.data.results.filter((r) => r.kind === "small").map((r) => `${r.outcome} ${r.beforeChars}->${r.afterChars} ${r.label}`)),
+		lastTurnTools: last?.toolCalls,
+		lastTurnUsedRecall: last?.usedRecall,
+		expected: both,
+		named,
+		correct: both.length > 0 && both.every((c) => named.includes(c)) && named.every((c) => both.includes(c) || answer.split("\n").filter((l) => l.includes(c.toLowerCase())).every((l) => /\b(not|no|none|only)\b/.test(l))),
+		mainCostUsd: summary.turns.reduce((n, t) => n + t.usage.reduce((m, u) => m + (u.cost ?? 0), 0), 0),
+	};
+	check("topics: the follow-up on task 1 names exactly the clients that retry on 503 and 502", summary.topics.correct, { expected: both, named });
+}
 if (model.startsWith("anthropic/")) {
 	check("anthropic requests stay within 4 breakpoints", summary.turns.every((t) => t.maxBreakpoints <= 4), summary.turns.map((t) => t.maxBreakpoints));
 }
@@ -317,6 +352,7 @@ for (const [i, t] of summary.turns.entries()) {
 	for (const g of t.guard) console.log(`guard: saved ${g.savedChars} chars in ${g.ms} ms, ${g.requests} Jev req, $${g.costUsd.toFixed(5)}${g.timedOut ? " TIMEOUT" : ""}\n  ${g.results.join("\n  ")}`);
 	console.log(`answer: ${t.answer.slice(0, 400).replace(/\n/g, " ⏎ ")}`);
 }
+if (summary.topics) console.log(`\ntopics: ${JSON.stringify(summary.topics, null, 1)}`);
 if (summary.long) {
 	const L = summary.long;
 	console.log(`\nlong: ${L.requests} requests, max context ${L.maxContext}, suite green: ${L.suiteGreen}, recall: ${L.recallCalls}, repeated non-suite calls: ${L.repeatedNonSuiteCalls.length}`);
