@@ -9,6 +9,7 @@ import { grepOutput, lines } from "./fixtures.ts";
 
 const options: DistillOptions = {
 	keepWholeThreshold: 0.7,
+	focusWholeThreshold: 0.6,
 	chunkKeepThreshold: 0.8,
 	noneThreshold: 0.5,
 	minRunChars: 1_000,

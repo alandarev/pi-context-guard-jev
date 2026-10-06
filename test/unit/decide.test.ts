@@ -15,7 +15,7 @@ const chunk = (index: number, files: string[] = [], text = `text of chunk ${inde
 const segment = [chunk(0, ["src/a.ts"]), chunk(1, ["src/b.ts", "src/c.ts", "src/d.ts", "src/e.ts"]), chunk(2)];
 const candidate: Candidate = { entryId: "r1", toolName: "bash", args: { command: "rg foo" }, text: "x" };
 const run = { question: "Where is foo?", answer: "In src/a.ts.", notes: "" };
-const thresholds = { keepWholeThreshold: 0.7, chunkKeepThreshold: 0.8, noneThreshold: 0.5 };
+const thresholds = { keepWholeThreshold: 0.7, focusWholeThreshold: 0.6, chunkKeepThreshold: 0.8, noneThreshold: 0.5 };
 
 const bool = (probability: number): ClassifierAnswer => ({ type: "bool", probability });
 const focus = (choice: string, probabilities: Record<string, number> = { [choice]: 0.9 }): ClassifierAnswer => ({
@@ -105,6 +105,20 @@ test("interpret: focus=whole keeps everything", () => {
 		kind: "keep-all",
 		reason: "whole-chosen",
 	});
+});
+
+test("interpret: a weak focus=whole falls through to the per-chunk answers", () => {
+	const decision = interpret(
+		response({ keep_whole: bool(0.2), focus: focus("whole", { whole: 0.43, chunk_2: 0.41 }), chunk_1: bool(0.1), chunk_2: bool(0.96), chunk_3: bool(0.2) }),
+		segment,
+		thresholds,
+	);
+	assert.deepEqual(decision, { kind: "select", keep: new Set([1]), reason: "chunks" });
+});
+
+test("interpret: a weak focus=whole with no passing chunk keeps everything", () => {
+	const decision = interpret(response({ keep_whole: bool(0.2), focus: focus("whole", { whole: 0.45, chunk_1: 0.4 }), chunk_1: bool(0.3) }), segment, thresholds);
+	assert.deepEqual(decision, { kind: "keep-all", reason: "whole-chosen" });
 });
 
 test("interpret: focus chunk plus chunks passing their bool question", () => {

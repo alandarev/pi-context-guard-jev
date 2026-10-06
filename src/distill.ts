@@ -35,6 +35,8 @@ export interface ResultRecord {
 	totalLines: number;
 	chunks: number;
 	requests: number;
+	/** Compact trace of Jev's answers per segment, e.g. "kw.14 focus=chunk_8:.66 keep 5/40". */
+	jev: string[];
 }
 
 export interface DistillOutcome {
@@ -140,6 +142,22 @@ export async function distillRun(
 	return outcome;
 }
 
+const p2 = (p: number | undefined): string => (p === undefined ? "?" : p.toFixed(2).replace(/^0/, ""));
+
+function traceOf(task: Task): string {
+	const decision = task.decision;
+	const answers = task.response?.answers;
+	const kw = answers?.keep_whole?.type === "bool" ? answers.keep_whole.probability : undefined;
+	const focus = answers?.focus?.type === "choice" ? answers.focus : undefined;
+	const head = answers ? `kw${p2(kw)} focus=${focus?.choice ?? "?"}:${p2(focus?.probabilities[focus.choice])}` : "no answer";
+	const tail = !decision
+		? "timeout"
+		: decision.kind === "keep-all"
+			? `keep all (${decision.detail === "timeout" ? "timeout" : decision.reason})`
+			: `keep ${decision.keep.size}/${task.segment.length}`;
+	return `${head} ${tail}`;
+}
+
 function decideCandidate(
 	run: RunInfo,
 	candidate: Candidate,
@@ -160,6 +178,7 @@ function decideCandidate(
 		totalLines,
 		chunks: chunks.length,
 		requests: tasks.filter((task) => task.response).length,
+		jev: tasks.map(traceOf),
 	};
 
 	const keep = new Set<number>();

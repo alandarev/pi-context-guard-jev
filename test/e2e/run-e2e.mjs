@@ -35,7 +35,10 @@ const turnsWanted = Number(opt("turns", "3"));
 const thinking = opt("thinking", "low");
 const withGuard = !args.includes("--no-guard");
 
-const PROMPTS = [
+const scenario = opt("scenario", "badge");
+const guardConfig = opt("config");
+const SCENARIOS = {};
+SCENARIOS.badge = [
 	"Which parts of this codebase use the StatusBadge UI component? Start with one broad case-insensitive search for " +
 		"'status' over the whole repo (rg -n -i status) to see everything related, then narrow down as needed. " +
 		"Answer with a list of file:line references and what each usage displays.",
@@ -43,13 +46,33 @@ const PROMPTS = [
 	"Quote, exactly as your very first broad search printed it, the match for src/api/jobStatus.ts line 3. " +
 		"Do not run a new search or read the file; get it from that earlier output.",
 ];
+// A long run (12+ tool calls) puts the question more than 20 cache positions back: this is where
+// the Anthropic question breakpoint matters (docs/CACHE.md).
+SCENARIOS.long = [
+	"Where is the StatusBadge component used? Start with one broad case-insensitive search (rg -n -i status). " +
+		"Then open every file under src/pages, src/widgets, src/admin, src/layout and src/components with the read tool, " +
+		"strictly one read call per message: wait for each result before making the next call. " +
+		"Finish with the list of StatusBadge usages and a one-line summary of what each opened file renders.",
+	"Which of those files did you find hardest to understand? One sentence.",
+];
+const PROMPTS = SCENARIOS[scenario];
+if (!PROMPTS) {
+	console.error(`unknown scenario ${scenario}`);
+	process.exit(2);
+}
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-const out = join(ROOT, "test/e2e/out", `${stamp}-${model.replace(/[^\w.-]+/g, "_")}${withGuard ? "" : "-noguard"}`);
+const label = `${scenario}${withGuard ? "" : "-noguard"}${guardConfig ? `-cfg${Buffer.from(guardConfig).toString("base64url").slice(0, 8)}` : ""}`;
+const out = join(ROOT, "test/e2e/out", `${stamp}-${model.replace(/[^\w.-]+/g, "_")}-${label}`);
 const repo = join(out, "repo");
+// Unique per run: OpenAI uses the session id as prompt_cache_key, so runs must not share it.
+const sessionId = `e2e-${stamp}-${Math.random().toString(36).slice(2, 8)}`;
 const sessions = join(out, "sessions");
 const captureFile = join(out, "capture.jsonl");
 mkdirSync(sessions, { recursive: true });
+// Never read the user's own context-guard settings: defaults, plus --config '{"key":value}' overrides.
+const configFile = join(out, "context-guard.json");
+writeFileSync(configFile, guardConfig ?? "{}");
 spawnSync(process.execPath, [join(HERE, "make-fixture.mjs"), repo], { stdio: "inherit" });
 
 const extArgs = [...exts.flatMap((p) => ["-e", p]), ...(withGuard ? ["-e", join(ROOT, "src/index.ts")] : []), "-e", join(HERE, "capture.ts")];
@@ -58,8 +81,8 @@ for (let i = 0; i < Math.min(turnsWanted, PROMPTS.length); i++) {
 	const started = Date.now();
 	const res = spawnSync(
 		"pi",
-		["--mode", "json", "-ne", ...extArgs, "--session-dir", sessions, "--session-id", "e2e", "--model", model, "--thinking", thinking, PROMPTS[i]],
-		{ cwd: repo, env: { ...process.env, CG_CAPTURE_FILE: captureFile, CG_TURN: String(i + 1) }, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 15 * 60_000 },
+		["--mode", "json", "-ne", ...extArgs, "--session-dir", sessions, "--session-id", sessionId, "--model", model, "--thinking", thinking, PROMPTS[i]],
+		{ cwd: repo, env: { ...process.env, CG_CAPTURE_FILE: captureFile, CG_TURN: String(i + 1), PI_CONTEXT_GUARD_CONFIG: configFile }, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 15 * 60_000 },
 	);
 	writeFileSync(join(out, `turn-${i + 1}.events.jsonl`), res.stdout ?? "");
 	writeFileSync(join(out, `turn-${i + 1}.stderr.txt`), res.stderr ?? "");
@@ -96,7 +119,7 @@ for (const r of capture) {
 	if (currentTurn > 0) (capTurns[currentTurn - 1] ??= []).push(r);
 }
 
-const summary = { model, withGuard, out, sessionFile, turns: [] };
+const summary = { model, scenario, withGuard, guardConfig, out, sessionFile, turns: [] };
 turnEntries.forEach((list, i) => {
 	const assistants = list.filter((e) => e.type === "message" && e.message.role === "assistant").map((e) => e.message);
 	const toolCalls = assistants.flatMap((m) => m.content.filter((b) => b.type === "toolCall").map((b) => `${b.name} ${JSON.stringify(b.arguments).slice(0, 120)}`));
@@ -114,7 +137,7 @@ turnEntries.forEach((list, i) => {
 		firstRequest: requests[0] && { bytes: requests[0].bytes, markers: requests[0].markers, breakpoints: requests[0].breakpoints },
 		maxBreakpoints: Math.max(0, ...requests.map((r) => r.breakpoints.length)),
 		edits: edits.map((e) => ({ targetId: e.targetId, chars: textOf(e.replacement ?? { content: [] }).length })),
-		guard: records.map((r) => ({ savedChars: r.savedChars, requests: r.requests, ms: r.ms, costUsd: r.costUsd, timedOut: r.timedOut, results: r.results.map((x) => `${x.outcome} ${x.beforeChars}->${x.afterChars} ${x.reason} ${x.label}`) })),
+		guard: records.map((r) => ({ savedChars: r.savedChars, requests: r.requests, ms: r.ms, costUsd: r.costUsd, timedOut: r.timedOut, results: r.results.map((x) => `${x.outcome} ${x.beforeChars}->${x.afterChars} ${x.reason} ${x.label}${x.jev ? `\n      jev: ${x.jev.join(" | ")}` : ""}`) })),
 	});
 });
 
@@ -122,15 +145,16 @@ turnEntries.forEach((list, i) => {
 const checks = [];
 const check = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail });
 const [t1, t2, t3] = summary.turns;
+const isBadge = scenario === "badge";
 const usageFiles = ["OrdersPage", "ServerListPage", "DeploymentCard", "InvoiceRow", "UserTable"];
-if (t1) {
+if (t1 && isBadge) {
 	check("turn 1 answer names all 5 usages", usageFiles.every((f) => t1.answer.includes(f)), usageFiles.filter((f) => !t1.answer.includes(f)));
 	if (withGuard) {
 		check("turn 1 produced context edits", t1.edits.length > 0, t1.edits.length);
 		check("turn 1 Jev record saved chars", (t1.guard[0]?.savedChars ?? 0) > 0, t1.guard[0]);
 	}
 }
-if (t2) {
+if (t2 && isBadge) {
 	check("turn 2 answer names the danger usages", ["OrdersPage", "DeploymentCard", "UserTable"].every((f) => t2.answer.includes(f)), t2.answer.slice(0, 300));
 	if (withGuard) {
 		const baseline = t1?.firstRequest?.markers ?? 0;
@@ -145,10 +169,18 @@ if (t2) {
 	const u = t2.usage[0];
 	if (u) check("turn 2 first request reads cache", (u.cacheRead ?? 0) > 0, u);
 }
-if (t3) {
+if (t3 && isBadge) {
 	const expected = readFileSync(join(repo, "src/api/jobStatus.ts"), "utf8").split("\n")[2].trim();
 	check("turn 3 quotes the removed line exactly", t3.answer.includes(expected), { expected, answer: t3.answer.slice(0, 300) });
-	if (withGuard) check("turn 3 used recall", t3.usedRecall, t3.toolCalls);
+	// Only required when distillation actually removed that line from the model's view.
+	const t3Payload = existsSync(`${captureFile}.t3-001.json`) ? readFileSync(`${captureFile}.t3-001.json`, "utf8") : "";
+	const stillVisible = t3Payload.includes(JSON.stringify(expected).slice(1, -1));
+	if (withGuard && !stillVisible) check("turn 3 used recall (line was distilled away)", t3.usedRecall, t3.toolCalls);
+}
+if (scenario === "long" && t1 && withGuard) {
+	check("long: turn 1 produced context edits", t1.edits.length > 0, t1.edits.length);
+	check("long: turn 1 made 10+ tool calls", t1.toolCalls.length >= 10, t1.toolCalls.length);
+	check("long: turn 1 had 10+ model requests (sequential calls)", t1.usage.length >= 10, t1.usage.length);
 }
 if (model.startsWith("anthropic/")) {
 	check("anthropic requests stay within 4 breakpoints", summary.turns.every((t) => t.maxBreakpoints <= 4), summary.turns.map((t) => t.maxBreakpoints));

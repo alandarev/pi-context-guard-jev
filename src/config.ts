@@ -16,13 +16,18 @@ export interface GuardConfig {
 	minRunChars: number;
 	/** Keep a result untouched when P(whole output needed) reaches this. */
 	keepWholeThreshold: number;
+	/** Keep a result untouched when Jev answers "most of it is needed" with at least this probability. */
+	focusWholeThreshold: number;
 	/** Keep a chunk when P(chunk needed) reaches this. */
 	chunkKeepThreshold: number;
 	/** Drop a whole result when Jev picks "none" with at least this probability and no chunk passes. */
 	noneThreshold: number;
 	/** Skip the edit when the kept part is larger than this fraction of the original. */
 	maxKeepRatio: number;
-	/** Always keep grep-style chunks for files that the final answer names. */
+	/**
+	 * Also keep grep-style chunks for files the final answer names. Off by default: answers also
+	 * name files to rule them out ("X only matches the word"), which keeps exactly the noise.
+	 */
 	keepCitedFiles: boolean;
 	/** Total time budget for all Jev calls of one run (ms). Unfinished results are left alone. */
 	timeoutMs: number;
@@ -41,13 +46,14 @@ export interface GuardConfig {
 export const DEFAULT_CONFIG: GuardConfig = {
 	enabled: true,
 	model: "openrouter/~typesafe/jev-latest",
-	minResultChars: 2_000,
+	minResultChars: 4_000,
 	minRunChars: 8_000,
 	keepWholeThreshold: 0.7,
-	chunkKeepThreshold: 0.8,
+	focusWholeThreshold: 0.6,
+	chunkKeepThreshold: 0.6,
 	noneThreshold: 0.5,
 	maxKeepRatio: 0.6,
-	keepCitedFiles: true,
+	keepCitedFiles: false,
 	timeoutMs: 8_000,
 	concurrency: 6,
 	maxSegmentChars: 40_000,
@@ -60,6 +66,7 @@ const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
 	minResultChars: [0, 10_000_000],
 	minRunChars: [0, 10_000_000],
 	keepWholeThreshold: [0, 1],
+	focusWholeThreshold: [0, 1],
 	chunkKeepThreshold: [0, 1],
 	noneThreshold: [0, 1],
 	maxKeepRatio: [0, 1],

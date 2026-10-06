@@ -21,7 +21,17 @@ export interface RunRecordData {
 	costUsd: number;
 	ms: number;
 	timedOut: boolean;
-	results: { entryId: string; tool: string; label: string; outcome: string; reason: string; beforeChars: number; afterChars: number }[];
+	results: {
+		entryId: string;
+		tool: string;
+		label: string;
+		outcome: string;
+		reason: string;
+		beforeChars: number;
+		afterChars: number;
+		/** Per-segment trace of Jev's answers (see distill.ts traceOf). */
+		jev?: string[];
+	}[];
 }
 
 export interface GuardStats {

@@ -34,7 +34,8 @@ import type { ClassifierRequest, ClassifierResponse, ClassifyFn, CustomDraft, Pr
 const STATUS_KEY = "context-guard";
 
 export default function contextGuard(pi: ExtensionAPI) {
-	const configPath = join(getAgentDir(), "context-guard.json");
+	// PI_CONTEXT_GUARD_CONFIG points at another settings file (tests, per-project setups).
+	const configPath = process.env.PI_CONTEXT_GUARD_CONFIG || join(getAgentDir(), "context-guard.json");
 	let config: GuardConfig = loadConfig(configPath).config;
 	let busy = false;
 	let problem: string | undefined;
@@ -143,7 +144,7 @@ export default function contextGuard(pi: ExtensionAPI) {
 				costUsd: outcome.costUsd,
 				ms: outcome.ms,
 				timedOut: outcome.timedOut,
-				results: outcome.records.map(({ entryId, tool, label, outcome, reason, beforeChars, afterChars }) => ({
+				results: outcome.records.map(({ entryId, tool, label, outcome, reason, beforeChars, afterChars, jev }) => ({
 					entryId,
 					tool,
 					label,
@@ -151,6 +152,7 @@ export default function contextGuard(pi: ExtensionAPI) {
 					reason,
 					beforeChars,
 					afterChars,
+					jev,
 				})),
 			} satisfies RunRecordData,
 		};
@@ -220,6 +222,7 @@ function describe(config: GuardConfig, stats: GuardStats, problem: string | unde
 		for (const result of last.results) {
 			const sizes = result.outcome === "kept" ? formatChars(result.beforeChars) : `${formatChars(result.beforeChars)} → ${formatChars(result.afterChars)}`;
 			lines.push(`  ${result.outcome.padEnd(9)} ${sizes.padEnd(13)} ${result.label}${result.reason ? ` (${result.reason})` : ""}`);
+			for (const trace of result.jev ?? []) lines.push(`      jev: ${trace}`);
 		}
 	}
 	return lines.join("\n");

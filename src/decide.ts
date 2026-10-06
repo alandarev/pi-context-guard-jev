@@ -16,6 +16,7 @@ import type { ClassifierQuestion, ClassifierRequest, ClassifierResponse } from "
 
 export interface DecideThresholds {
 	keepWholeThreshold: number;
+	focusWholeThreshold: number;
 	chunkKeepThreshold: number;
 	noneThreshold: number;
 }
@@ -136,8 +137,12 @@ export function interpret(response: ClassifierResponse, segment: readonly Chunk[
 
 	// 1. Coarse: the whole output is needed.
 	if (keepWhole >= thresholds.keepWholeThreshold) return { kind: "keep-all", reason: "whole-needed" };
-	// 2. Jev says no single chunk is enough.
-	if (focus.choice === "whole") return { kind: "keep-all", reason: "whole-chosen" };
+	// 2. Jev says the answer draws on most of the output. A weak "whole" (it often splits the vote
+	//    with the key chunk) falls through to the per-chunk answers; maxKeepRatio still keeps the
+	//    result untouched if most chunks turn out to be needed.
+	if (focus.choice === "whole" && (focus.probabilities.whole ?? 0) >= thresholds.focusWholeThreshold) {
+		return { kind: "keep-all", reason: "whole-chosen" };
+	}
 
 	// 3. The chunk Jev named, plus every chunk that passes its own yes/no question.
 	const keep = new Set<number>();
@@ -149,6 +154,7 @@ export function interpret(response: ClassifierResponse, segment: readonly Chunk[
 	if (focus.choice === "none" && keep.size === 0 && (focus.probabilities.none ?? 0) >= thresholds.noneThreshold) {
 		return { kind: "select", keep, reason: "none-needed" };
 	}
+	if (keep.size === 0 && focus.choice === "whole") return { kind: "keep-all", reason: "whole-chosen" };
 	if (keep.size === 0) {
 		// Jev picked "none" without conviction: keep its best chunk rather than nothing.
 		const best = segment
