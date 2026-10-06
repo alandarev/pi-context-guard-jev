@@ -1,0 +1,5 @@
+node_modules/
+.draft/
+*.log
+/test/e2e/out/
+.DS_Store
