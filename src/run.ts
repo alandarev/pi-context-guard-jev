@@ -1,5 +1,5 @@
 /**
- * Find the run that just finished and its candidate tool results (DESIGN.md → Algorithm 2–3).
+ * Find the run that just finished and its candidate tool results (see docs/DESIGN.md).
  */
 import { MARKER } from "./render.ts";
 import { isTextOnly, type MessageLike, type ProjectedEntryLike, textOf } from "./types.ts";
@@ -29,20 +29,22 @@ export interface CollectOptions {
 	excludeTools: readonly string[];
 }
 
-const hasText = (message: MessageLike): boolean => textOf(message).trim().length > 0;
+/** Question text used when the prompt that started the run has no text (e.g. only an image). */
+export const NO_TEXT_QUESTION = "[the user sent only an image]";
 
 /**
- * The run starts after the last user message with text. Steering messages sent during a
- * run are user messages too, so they start a new span; tool results before them are left
- * for later (they stay unpruned, which is the safe direction).
+ * The run starts after the last user message, with or without text. Steering messages sent
+ * during a run are user messages too, so they start a new span; tool results before them are
+ * left for later (they stay unpruned, which is the safe direction).
  */
 export function collectRun(entries: readonly ProjectedEntryLike[], options: CollectOptions): RunInfo | undefined {
 	let start = entries.length - 1;
-	while (start >= 0 && !entries[start].messages.some((m) => m.role === "user" && hasText(m))) start--;
+	while (start >= 0 && !entries[start].messages.some((m) => m.role === "user")) start--;
 	if (start < 0) return undefined;
 
-	const questionMessage = entries[start].messages.findLast((m) => m.role === "user" && hasText(m));
-	const question = questionMessage ? textOf(questionMessage) : "";
+	const questionMessage = entries[start].messages.findLast((m) => m.role === "user");
+	const questionText = questionMessage ? textOf(questionMessage).trim() : "";
+	const question = questionText ? textOf(questionMessage as MessageLike) : NO_TEXT_QUESTION;
 	const span = entries.slice(start + 1);
 
 	const assistantTexts: string[] = [];
@@ -76,6 +78,10 @@ export function collectRun(entries: readonly ProjectedEntryLike[], options: Coll
 		if (exclude.has(toolName)) continue;
 		const text = textOf(message);
 		if (text.length < options.minResultChars || text.startsWith(MARKER)) continue;
+		// Another extension already edited this result: recall returns the raw entry, so whatever
+		// that edit added could not be recovered after distillation. Leave it alone.
+		const raw = entry.sourceEntry.message;
+		if (raw && textOf(raw) !== text) continue;
 		candidates.push({ entryId: entry.sourceEntry.id, toolName, args: call?.args, text });
 	}
 	return { question, answer, notes, candidates, toolResults };

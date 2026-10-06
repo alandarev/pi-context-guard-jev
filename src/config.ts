@@ -76,6 +76,8 @@ const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
 	maxChunksPerSegment: [2, 60],
 };
 
+const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment"]);
+
 /** Merge untrusted JSON over the defaults, keeping only well-typed, in-range values. */
 export function normalizeConfig(raw: unknown): GuardConfig {
 	const config: GuardConfig = { ...DEFAULT_CONFIG, excludeTools: [...DEFAULT_CONFIG.excludeTools] };
@@ -89,6 +91,7 @@ export function normalizeConfig(raw: unknown): GuardConfig {
 			(config as unknown as Record<string, unknown>)[key] = value;
 		} else if (typeof fallback === "number" && typeof value === "number" && Number.isFinite(value)) {
 			const range = NUMBER_RANGES[key];
+			if (INTEGER_KEYS.has(key) && !Number.isInteger(value)) continue;
 			if (!range || (value >= range[0] && value <= range[1])) (config as unknown as Record<string, unknown>)[key] = value;
 		} else if (key === "model" && typeof value === "string" && value.indexOf("/") > 0) {
 			config.model = value.trim();

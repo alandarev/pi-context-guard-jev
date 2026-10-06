@@ -39,7 +39,29 @@ const hasText = (message: Json): boolean =>
 		? message.content.trim().length > 0
 		: Array.isArray(message.content) && message.content.some((b: Json) => b?.type === "text" && typeof b.text === "string" && b.text.trim());
 
-export type PinResult = "pinned" | "no-cache" | "no-question" | "already" | "over-budget" | "not-anthropic";
+export type PinResult = "pinned" | "no-cache" | "no-question" | "already" | "over-budget" | "ttl-conflict" | "not-anthropic";
+
+/** Anthropic TTLs in minutes; a breakpoint without `ttl` lasts 5 minutes. */
+const ttlMinutes = (cacheControl: Json): number => (cacheControl.ttl === "1h" ? 60 : 5);
+
+/**
+ * TTLs of the breakpoints before and after `target`, in Anthropic's prefix order
+ * (tools → system → messages).
+ */
+function ttlsAround(payload: Json, target: Json): { before: number[]; after: number[] } {
+	const result = { before: [] as number[], after: [] as number[] };
+	let passed = false;
+	const visit = (value: unknown) => {
+		if (Array.isArray(value)) value.forEach(visit);
+		else if (value && typeof value === "object") {
+			if (value === target) passed = true;
+			else if ((value as Json).cache_control) (passed ? result.after : result.before).push(ttlMinutes((value as Json).cache_control));
+			for (const child of Object.values(value)) visit(child);
+		}
+	};
+	visit([payload.tools, payload.system, payload.messages]);
+	return result;
+}
 
 /** Mutates an Anthropic Messages payload in place. */
 export function pinQuestionBreakpoint(payload: unknown): PinResult {
@@ -48,7 +70,7 @@ export function pinQuestionBreakpoint(payload: unknown): PinResult {
 	const messages = body.messages;
 	if (!Array.isArray(messages) || messages.length < 2) return "no-question";
 
-	// Reuse Pi's rolling breakpoint settings (type + ttl) so TTL ordering stays valid.
+	// Reuse Pi's rolling breakpoint settings (type, and ttl when the ordering allows it).
 	const rolling = lastCacheControl(messages);
 	if (!rolling) return "no-cache";
 
@@ -69,7 +91,16 @@ export function pinQuestionBreakpoint(payload: unknown): PinResult {
 	const block = question.content.findLast((b: Json) => b?.type === "text" && typeof b.text === "string" && b.text.trim());
 	if (!block) return "no-question";
 	if (block.cache_control) return "already";
-	block.cache_control = { ...rolling };
+
+	// Longer TTLs must come first: every breakpoint before the pin needs TTL ≥ the pin's, every
+	// one after it TTL ≤ the pin's. Prefer the rolling breakpoint's TTL, else try the other one.
+	const { before, after } = ttlsAround(body, block);
+	const fits = (ttl: number) => before.every((t) => t >= ttl) && after.every((t) => t <= ttl);
+	const rollingTtl = ttlMinutes(rolling);
+	const ttl = [rollingTtl, rollingTtl === 60 ? 5 : 60].find(fits);
+	if (ttl === undefined) return "ttl-conflict";
+	const { ttl: _rollingTtl, ...rest } = rolling;
+	block.cache_control = ttl === 60 ? { ...rest, ttl: "1h" } : rest;
 
 	let identityCacheControl: unknown;
 	if (countBreakpoints(body) > ANTHROPIC_MAX_BREAKPOINTS) {

@@ -75,6 +75,27 @@ async function pool<T>(items: readonly T[], limit: number, signal: AbortSignal, 
 	await Promise.all(runners);
 }
 
+const segmentChars = (segment: readonly Chunk[]): number => segment.reduce((sum, chunk) => sum + chunk.text.length + 1, 0);
+
+/** Settle with `promise`, or reject as soon as `signal` aborts, whichever comes first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) return Promise.reject(signal.reason);
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(err) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(err);
+			},
+		);
+	});
+}
+
 export async function distillRun(
 	run: RunInfo,
 	classify: ClassifyFn,
@@ -93,27 +114,31 @@ export async function distillRun(
 	chunked.forEach((chunks, candidate) => {
 		const segments = segmentChunks(chunks, options.maxSegmentChars, options.maxChunksPerSegment);
 		const totalLines = chunks.length > 0 ? chunks[chunks.length - 1].end : 0;
-		segments.forEach((segment, segmentIndex) =>
-			tasks.push({ candidate, segment, segmentIndex, segmentCount: segments.length, totalLines }),
-		);
+		segments.forEach((segment, segmentIndex) => {
+			const task: Task = { candidate, segment, segmentIndex, segmentCount: segments.length, totalLines };
+			// A single chunk can exceed the segment limit (e.g. one huge line): keep it, never send it.
+			if (segmentChars(segment) > options.maxSegmentChars) task.decision = { kind: "keep-all", reason: "oversize" };
+			tasks.push(task);
+		});
 	});
 
 	const budget = new AbortController();
 	const timer = setTimeout(() => budget.abort(new Error("context-guard time budget exceeded")), options.timeoutMs);
 	const signal = parentSignal ? AbortSignal.any([parentSignal, budget.signal]) : budget.signal;
 	try {
-		await pool(tasks, options.concurrency, signal, async (task) => {
+		await pool(tasks.filter((task) => !task.decision), options.concurrency, signal, async (task) => {
 			const candidate = run.candidates[task.candidate];
 			const request = buildRequest(run, candidate, task.segment, task.segmentIndex, task.segmentCount, task.totalLines);
 			outcome.requests++;
 			try {
-				const response = await classify(request, signal);
+				// Race the request against the budget: a provider that ignores the signal must not
+				// hold up settlement. An answer that arrives after the deadline is ignored.
+				const response = await untilAborted(classify(request, signal), signal);
 				task.response = response;
 				if (response.usage) {
 					outcome.inputTokens += response.usage.input;
 					outcome.costUsd += response.usage.cost.total;
 				}
-				// A request that finished after the budget ran out is still usable.
 				task.decision =
 					response.stopReason === "aborted"
 						? { kind: "keep-all", reason: "error", detail: budget.signal.aborted ? "timeout" : "aborted" }

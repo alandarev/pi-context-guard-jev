@@ -173,13 +173,13 @@ export default function contextGuard(pi: ExtensionAPI) {
 		description:
 			`Return the original output of a tool result that context-guard distilled (its text starts with "${MARKER}"). ` +
 			"Pass the entryId from that header. Optionally pass a regex `pattern` to get only matching lines (with line numbers), " +
-			"or `offset`/`limit` (1-based lines) to page through a long output.",
+			"and `offset`/`limit` (1-based) to page through a long output; with a `pattern` they count matching lines.",
 		promptSnippet: `recall: fetch the full original output of a tool result marked "${MARKER}"`,
 		parameters: Type.Object({
 			entryId: Type.String({ description: "Entry id from the context-guard header" }),
 			pattern: Type.Optional(Type.String({ description: "JavaScript regex; return only matching lines" })),
-			offset: Type.Optional(Type.Number({ description: "First line to return, 1-based" })),
-			limit: Type.Optional(Type.Number({ description: "Most lines to return" })),
+			offset: Type.Optional(Type.Number({ description: "First line to return, 1-based (counts matching lines when pattern is set)" })),
+			limit: Type.Optional(Type.Number({ description: "Most lines to return (matching lines when pattern is set)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const original = originalOutput(ctx.sessionManager.getEntry(params.entryId) as never, params.entryId);

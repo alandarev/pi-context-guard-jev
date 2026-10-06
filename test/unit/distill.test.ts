@@ -333,3 +333,75 @@ test("usage and cost are summed; responses without usage count zero", async () =
 	assert.equal(outcome.inputTokens, 200);
 	assert.ok(Math.abs(outcome.costUsd - 0.002) < 1e-12);
 });
+
+test("time budget is enforced against a classifier that ignores the signal", async () => {
+	const never: ClassifyFn = () => new Promise<ClassifierResponse>(() => {});
+	const started = Date.now();
+	const outcome = await distillRun(runOf([candidate("a", lines(200))]), never, { ...options, timeoutMs: 500 });
+	const elapsed = Date.now() - started;
+	assert.ok(elapsed < 1_000, `took ${elapsed} ms`);
+	assert.equal(outcome.timedOut, true);
+	assert.deepEqual(outcome.edits, []);
+	assert.deepEqual(
+		outcome.records.map((r) => [r.outcome, r.reason, r.requests]),
+		[["kept", "timeout", 0]],
+	);
+});
+
+test("an answer arriving after the deadline is ignored", async () => {
+	// Resolves 300 ms after the budget ran out, ignoring the signal.
+	const late: ClassifyFn = (request) => new Promise((resolve) => setTimeout(() => resolve(answer(request, () => [])), 800));
+	const outcome = await distillRun(runOf([candidate("a", lines(200))]), late, { ...options, timeoutMs: 500 });
+	assert.equal(outcome.timedOut, true);
+	assert.deepEqual(outcome.edits, []);
+	assert.equal(outcome.records[0].reason, "timeout");
+	assert.equal(outcome.inputTokens, 0);
+	// Let the late timer fire before the test ends.
+	await new Promise((resolve) => setTimeout(resolve, 400));
+});
+
+test("segments over maxSegmentChars are kept without a Jev request", async () => {
+	// One 30k-character line is one chunk, larger than maxSegmentChars.
+	const text = `${lines(100)}\n${"z".repeat(30_000)}\n${lines(100, "tail")}`;
+	const chunks = chunkOutput(text, DEFAULT_CHUNK_OPTIONS);
+	const big = chunks.find((c) => c.text.length === 30_000);
+	assert.ok(big);
+	const requests: ClassifierRequest[] = [];
+	const outcome = await distillRun(
+		runOf([candidate("a", text)]),
+		async (request) => {
+			requests.push(request);
+			return answer(request, () => []);
+		},
+		{ ...options, maxSegmentChars: 20_000, maxKeepRatio: 0.9 },
+	);
+	for (const request of requests) {
+		const size = Object.values(request.state.chunks as Record<string, string>).reduce((n, t) => n + t.length + 1, 0);
+		assert.ok(size <= 20_000, `request of ${size} chars`);
+	}
+	assert.ok(requests.length >= 1);
+	assert.equal(outcome.requests, requests.length);
+	const kept = outcome.edits[0].replacement.content[0].text;
+	assert.ok(kept.includes(big.text), "the oversized chunk is kept verbatim");
+	assert.equal(outcome.records[0].outcome, "distilled");
+	assert.ok(outcome.records[0].jev.some((trace) => trace.includes("keep all (oversize)")));
+});
+
+test("a result made only of oversized segments is kept with reason oversize", async () => {
+	const text = "z".repeat(30_000);
+	let calls = 0;
+	const outcome = await distillRun(
+		runOf([candidate("a", text)]),
+		async (request) => {
+			calls++;
+			return answer(request, () => []);
+		},
+		{ ...options, maxSegmentChars: 20_000 },
+	);
+	assert.equal(calls, 0);
+	assert.equal(outcome.requests, 0);
+	assert.deepEqual(
+		outcome.records.map((r) => [r.outcome, r.reason]),
+		[["kept", "oversize"]],
+	);
+});

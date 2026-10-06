@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MARKER } from "../../src/render.ts";
-import { collectRun } from "../../src/run.ts";
+import { collectRun, NO_TEXT_QUESTION } from "../../src/run.ts";
 import { assistant, entry, lines, toolResult, user } from "./fixtures.ts";
 
 const options = { minResultChars: 100, excludeTools: ["edit", "write"] };
@@ -10,8 +10,46 @@ const big = lines(10);
 test("collectRun returns undefined without a user message", () => {
 	assert.equal(collectRun([], options), undefined);
 	assert.equal(collectRun([assistant("hi"), toolResult("c1", "bash", big)], options), undefined);
-	// A user message without text does not start a run.
-	assert.equal(collectRun([entry({ role: "user", content: [{ type: "image", data: "x" }] })], options), undefined);
+});
+
+test("an image-only prompt is the run boundary; no older question is used", () => {
+	const entries = [
+		user("old text question"),
+		assistant("old answer", [{ id: "c0", name: "bash", arguments: {} }]),
+		toolResult("c0", "bash", big, "old"),
+		entry({ role: "user", content: [{ type: "image", data: "x", mimeType: "image/png" }] }, "img"),
+		assistant("", [{ id: "c1", name: "bash", arguments: {} }]),
+		toolResult("c1", "bash", big, "new"),
+		assistant("The screenshot shows an error."),
+	];
+	const run = collectRun(entries, options);
+	assert.ok(run);
+	assert.equal(run.question, NO_TEXT_QUESTION);
+	assert.equal(run.answer, "The screenshot shows an error.");
+	assert.deepEqual(
+		run.candidates.map((c) => c.entryId),
+		["new"],
+	);
+	const only = collectRun([entry({ role: "user", content: [{ type: "image", data: "x" }] })], options);
+	assert.equal(only?.question, NO_TEXT_QUESTION);
+});
+
+test("results another extension already edited are skipped", () => {
+	const raw = { role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: big }], isError: false };
+	const edited = { ...raw, content: [{ type: "text", text: `${big}\n[note added by another extension]` }] };
+	const entries = [
+		user("q"),
+		assistant("", [{ id: "c1", name: "bash", arguments: {} }, { id: "c2", name: "bash", arguments: {} }]),
+		{ sourceEntry: { id: "edited", type: "message", message: raw }, messages: [edited] },
+		toolResult("c2", "bash", big, "plain"),
+	];
+	const run = collectRun(entries, options);
+	assert.ok(run);
+	assert.equal(run.toolResults, 2);
+	assert.deepEqual(
+		run.candidates.map((c) => c.entryId),
+		["plain"],
+	);
 });
 
 test("collectRun extracts question, answer, notes and candidates", () => {

@@ -33,6 +33,20 @@ test("normalizeConfig drops bad types and out-of-range numbers", () => {
 	assert.deepEqual(config, DEFAULT_CONFIG);
 });
 
+test("normalizeConfig rejects non-integer counts and sizes", () => {
+	const config = normalizeConfig({
+		minResultChars: 500.5,
+		minRunChars: 1e3 + 0.1,
+		timeoutMs: 1_500.25,
+		concurrency: 2.5,
+		maxSegmentChars: 10_000.5,
+		maxChunksPerSegment: 10.1,
+		keepWholeThreshold: 0.55,
+	});
+	assert.deepEqual(config, { ...DEFAULT_CONFIG, keepWholeThreshold: 0.55 });
+	assert.equal(normalizeConfig({ concurrency: 2.0 }).concurrency, 2);
+});
+
 test("normalizeConfig keeps valid values", () => {
 	const config = normalizeConfig({
 		enabled: false,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { originalOutput, RECALL_MAX_BYTES, RECALL_MAX_LINES, recallText } from "../../src/recall.ts";
+import { originalOutput, RECALL_MATCH_CHARS, RECALL_MAX_BYTES, RECALL_MAX_LINES, RECALL_MAX_PATTERN, recallText } from "../../src/recall.ts";
 
 const numbered = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n");
 
@@ -52,7 +52,42 @@ test("recallText caps lines and bytes", () => {
 	assert.ok(Buffer.byteLength(shown, "utf8") <= RECALL_MAX_BYTES);
 	assert.match(out, /\[Showing lines 1–(\d+) of 100\. Use offset=\d+ to continue\.\]$/);
 
-	// A single line longer than the byte cap is still returned.
-	const huge = "x".repeat(RECALL_MAX_BYTES * 2);
-	assert.equal(recallText(huge, {}), huge);
+});
+
+test("recallText cuts a single line over the byte cap, keeping valid UTF-8", () => {
+	const huge = "é".repeat(RECALL_MAX_BYTES); // 2 bytes per character
+	const out = recallText(`${huge}\nnext line`, {});
+	const [cut, note, blank, paging] = out.split("\n");
+	assert.ok(Buffer.byteLength(out.split("\n\n[Showing")[0], "utf8") <= RECALL_MAX_BYTES);
+	assert.ok(cut.length > 20_000 && huge.startsWith(cut), "a prefix of the line, whole characters only");
+	assert.equal(Buffer.from(cut, "utf8").toString("utf8"), cut);
+	assert.ok(!cut.includes("\uFFFD"));
+	assert.equal(note, "[line 1 cut at 50KB]");
+	assert.equal(blank, "");
+	assert.equal(paging, "[Showing lines 1–1 of 2. Use offset=2 to continue.]");
+
+	const later = recallText(`short\n${"x".repeat(RECALL_MAX_BYTES * 2)}`, {});
+	assert.equal(later, "short\n\n[Showing lines 1–1 of 2. Use offset=2 to continue.]");
+	const paged = recallText(`short\n${"x".repeat(RECALL_MAX_BYTES * 2)}`, { offset: 2 });
+	assert.match(paged, /\n\[line 2 cut at 50KB\]$/);
+	assert.ok(Buffer.byteLength(paged, "utf8") <= RECALL_MAX_BYTES);
+
+	const matched = recallText(`a\n${"x".repeat(RECALL_MAX_BYTES * 2)}`, { pattern: "^x" });
+	assert.ok(matched.startsWith("2: xxx"));
+	assert.match(matched, /\n\[line 2 cut at 50KB\]$/);
+});
+
+test("recallText interrupts catastrophic backtracking", () => {
+	const text = `ok\n${"a".repeat(40)}!\nok`;
+	const started = Date.now();
+	assert.throws(() => recallText(text, { pattern: "(a+)+$" }), /Pattern took too long .*use a simpler pattern/);
+	assert.ok(Date.now() - started < 2_000, `took ${Date.now() - started} ms`);
+});
+
+test("recallText limits pattern length and matched line length", () => {
+	assert.throws(() => recallText("x", { pattern: "a".repeat(RECALL_MAX_PATTERN + 1) }), /longer than 500 characters/);
+	assert.equal(recallText("ax", { pattern: `${"a".repeat(RECALL_MAX_PATTERN - 2)}|x` }), "1: ax");
+	const long = `${"y".repeat(RECALL_MATCH_CHARS)}NEEDLE`;
+	assert.match(recallText(long, { pattern: "NEEDLE" }), /^No line of the original output/);
+	assert.match(recallText(`${"y".repeat(RECALL_MATCH_CHARS - 6)}NEEDLE`, { pattern: "NEEDLE$" }), /^1: y+NEEDLE$/);
 });

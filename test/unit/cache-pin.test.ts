@@ -64,6 +64,8 @@ test("OAuth payload: drops the redundant system[0] breakpoint (stays at 4)", () 
 
 test("trailing mid-conversation system messages are skipped; rolling ttl is copied", () => {
 	const payload = apiKeyPayload();
+	payload.system = [text("system prompt", cc1h)];
+	payload.tools = [{ name: "a" }, { name: "b", cache_control: { ...cc1h } }];
 	payload.messages = [
 		{ role: "user", content: [text("first question")] },
 		{ role: "system", content: [], output_config: { effort: "high" } },
@@ -140,4 +142,53 @@ test("non-payloads", () => {
 	assert.equal(pinQuestionBreakpoint(undefined), "not-anthropic");
 	assert.equal(pinQuestionBreakpoint("x"), "not-anthropic");
 	assert.equal(pinQuestionBreakpoint({ input: [] }), "no-question");
+});
+
+/** question (no cc) → assistant block with `middle` → last user with `rolling`. */
+function ttlPayload(head: Json | undefined, middle: Json | undefined, rolling: Json): Json {
+	return {
+		...(head ? { system: [text("system prompt", head)], tools: [{ name: "a" }] } : {}),
+		messages: [
+			{ role: "user", content: [text("question")] },
+			{ role: "assistant", content: [text("answer", middle)] },
+			{ role: "user", content: [text("next question", rolling)] },
+		],
+	};
+}
+
+test("TTL ordering: a 1h breakpoint after the pin forces a 1h pin (rolling is 5m)", () => {
+	const payload = ttlPayload(undefined, cc1h, cc);
+	assert.equal(pinQuestionBreakpoint(payload), "pinned");
+	assert.deepEqual(payload.messages[0].content[0].cache_control, cc1h);
+
+	const with1hHead = ttlPayload(cc1h, cc1h, cc);
+	assert.equal(pinQuestionBreakpoint(with1hHead), "pinned");
+	assert.deepEqual(with1hHead.messages[0].content[0].cache_control, cc1h);
+});
+
+test("TTL ordering: 5m before and 1h after the pin is a conflict", () => {
+	const payload = ttlPayload(cc, cc1h, cc);
+	const before = structuredClone(payload);
+	assert.equal(pinQuestionBreakpoint(payload), "ttl-conflict");
+	assert.deepEqual(payload, before);
+});
+
+test("TTL ordering: all-1h pins 1h, all-5m pins 5m", () => {
+	const allLong = ttlPayload(cc1h, cc1h, cc1h);
+	assert.equal(pinQuestionBreakpoint(allLong), "pinned");
+	assert.deepEqual(allLong.messages[0].content[0].cache_control, cc1h);
+
+	const allShort = ttlPayload(cc, cc, cc);
+	assert.equal(pinQuestionBreakpoint(allShort), "pinned");
+	assert.deepEqual(allShort.messages[0].content[0].cache_control, cc);
+});
+
+test("TTL ordering: a 1h rolling breakpoint after a 5m prefix is a conflict", () => {
+	// 5m system then 1h rolling is itself invalid for Anthropic, but the pin must not add to it:
+	// before = [5m, 5m] needs pin ≤ 5m, after = [1h] needs pin ≥ 1h → conflict.
+	assert.equal(pinQuestionBreakpoint(ttlPayload(cc, undefined, cc1h)), "ttl-conflict");
+	// With nothing before it, a 1h rolling breakpoint gives a 1h pin.
+	const payload = ttlPayload(undefined, undefined, cc1h);
+	assert.equal(pinQuestionBreakpoint(payload), "pinned");
+	assert.deepEqual(payload.messages[0].content[0].cache_control, cc1h);
 });

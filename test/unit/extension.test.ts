@@ -16,6 +16,11 @@ import { assistant, lines, toolResult, user } from "./fixtures.ts";
 const agentDir = mkdtempSync(join(tmpdir(), "context-guard-agent-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+// PI_CONTEXT_GUARD_CONFIG wins over the agent dir; point it at the temp file too, so a value
+// inherited from the shell can never make the tests write a real config.
+const configFile = join(agentDir, "context-guard.json");
+const previousConfig = process.env.PI_CONTEXT_GUARD_CONFIG;
+process.env.PI_CONTEXT_GUARD_CONFIG = configFile;
 
 const repo = resolve(import.meta.dirname, "../..");
 const loaderPath = join(repo, "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js");
@@ -30,7 +35,7 @@ interface LoadedExtension {
 let extension: LoadedExtension;
 
 before(async () => {
-	writeFileSync(join(agentDir, "context-guard.json"), JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
 	const { loadExtensions } = (await import(pathToFileURL(loaderPath).href)) as {
 		loadExtensions: (paths: string[], cwd: string) => Promise<{ extensions: LoadedExtension[]; errors: { path: string; error: string }[] }>;
 	};
@@ -43,6 +48,8 @@ before(async () => {
 after(() => {
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	if (previousConfig === undefined) delete process.env.PI_CONTEXT_GUARD_CONFIG;
+	else process.env.PI_CONTEXT_GUARD_CONFIG = previousConfig;
 	rmSync(agentDir, { recursive: true, force: true });
 });
 
@@ -203,7 +210,6 @@ test("/guard off|on persists to the temp agent dir and pauses distillation", asy
 		notes.push(message);
 	};
 	const guard = extension.commands.get("guard")!;
-	const configFile = join(agentDir, "context-guard.json");
 
 	await guard.handler("off", ctx);
 	assert.deepEqual(JSON.parse(readFileSync(configFile, "utf8")), { timeoutMs: 5_000, enabled: false });

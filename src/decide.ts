@@ -1,7 +1,7 @@
 /**
- * Ask Jev which parts of one tool output are still needed (DESIGN.md → Algorithm 4–5).
+ * Ask Jev which parts of one tool output are still needed (see docs/DESIGN.md).
  *
- * Questions are evaluated in the user's order:
+ * Answers are applied in this order:
  *   1. keep_whole — is the complete output still needed? (coarse)
  *   2. focus      — does the answer draw on most of the output, or on a few chunks (naming the key one)? (choice: whole / none / chunk_N)
  *   3. chunk_N    — is this chunk needed? (one yes/no per chunk)
@@ -22,7 +22,7 @@ export interface DecideThresholds {
 }
 
 export type SegmentDecision =
-	| { kind: "keep-all"; reason: "whole-needed" | "whole-chosen" | "no-answer" | "error"; detail?: string }
+	| { kind: "keep-all"; reason: "whole-needed" | "whole-chosen" | "no-answer" | "error" | "oversize"; detail?: string }
 	| { kind: "select"; keep: Set<number>; reason: "chunks" | "none-needed" };
 
 const QUESTION_LIMIT = 4_000;
