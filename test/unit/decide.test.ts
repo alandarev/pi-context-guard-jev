@@ -57,6 +57,15 @@ test("buildRequest: state and one bool question per chunk", () => {
 	assert.doesNotMatch(JSON.stringify(request), /part \d of/);
 });
 
+test("buildRequest marks failed tool calls", () => {
+	const chunks = [{ index: 0, start: 0, end: 1, text: "FAIL test 1", files: [] }];
+	const run = { question: "q", answer: "fixed it", notes: "", history: { exchanges: [] } };
+	const failed = buildRequest(run, { ...candidate, isError: true }, chunks, 0, 1, 1).state as Record<string, unknown>;
+	assert.match(String(failed.tool_status), /^failed .*got past this failure/);
+	const ok = buildRequest(run, candidate, chunks, 0, 1, 1).state as Record<string, unknown>;
+	assert.equal(ok.tool_status, undefined);
+});
+
 test("buildRequest without history uses the single-run wording", () => {
 	for (const history of [undefined, { exchanges: [] }]) {
 		const request = buildRequest({ ...run, history }, candidate, segment, 0, 1, 30);

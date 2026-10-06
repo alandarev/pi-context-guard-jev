@@ -12,6 +12,8 @@ export interface Candidate {
 	args: Record<string, unknown> | undefined;
 	/** Model-visible text (after earlier context edits). */
 	text: string;
+	/** The tool reported an error (e.g. a command that exited non-zero). */
+	isError?: boolean;
 }
 
 export interface RunInfo {
@@ -45,6 +47,8 @@ export interface RunHistory {
 export interface CollectOptions {
 	minResultChars: number;
 	excludeTools: readonly string[];
+	/** Include error results (failing commands). Default false. */
+	distillErrors?: boolean;
 	/** Earlier exchanges to include in `history`; 0 = no history at all. */
 	historyExchanges: number;
 }
@@ -97,7 +101,7 @@ export function collectRun(entries: readonly ProjectedEntryLike[], options: Coll
 		const message = entry.messages[0];
 		if (entry.messages.length !== 1 || message?.role !== "toolResult") continue;
 		toolResults++;
-		if (message.isError || !isTextOnly(message)) continue;
+		if ((message.isError && !options.distillErrors) || !isTextOnly(message)) continue;
 		const call = message.toolCallId ? toolCalls.get(message.toolCallId) : undefined;
 		const toolName = message.toolName ?? call?.name ?? "tool";
 		if (exclude.has(toolName)) continue;
@@ -107,7 +111,7 @@ export function collectRun(entries: readonly ProjectedEntryLike[], options: Coll
 		// that edit added could not be recovered after distillation. Leave it alone.
 		const raw = entry.sourceEntry.message;
 		if (raw && textOf(raw) !== text) continue;
-		candidates.push({ entryId: entry.sourceEntry.id, toolName, args: call?.args, text });
+		candidates.push({ entryId: entry.sourceEntry.id, toolName, args: call?.args, text, ...(message.isError ? { isError: true } : {}) });
 	}
 	const history = collectHistory(entries.slice(0, start), options.historyExchanges);
 	return { question, answer, notes, candidates, toolResults, history };

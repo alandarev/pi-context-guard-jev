@@ -79,7 +79,9 @@ Clipping keeps the head (70%) and tail with a `[…]` line in between.
 A tool result in the span is a candidate if all of these hold:
 
 - its entry projects to exactly one `toolResult` message,
-- it is not an error and has only text blocks (no images),
+- it has only text blocks (no images), and it is not an error result unless `distillErrors` is on (the
+  default: the log of a failing test or build is often the biggest output of a run, and stale once the
+  agent got past it),
 - its tool is not in `excludeTools` (`edit`, `write`),
 - its model-visible text has at least `minResultChars` (4,000) characters,
 - it does not start with `[context-guard]`, meaning it was not distilled already,
@@ -127,6 +129,7 @@ The request **state** contains:
 | `final_answer` | The answer, at most 6,000 characters |
 | `agent_notes_during_the_run` | Earlier assistant text, at most 2,000 characters (only if there is any) |
 | `tool`, `tool_arguments` | Tool name; arguments as JSON, at most 600 characters |
+| `tool_status` | Only for error results: says the call failed, and that its details are usually no longer needed if `final_answer` shows the agent got past the failure |
 | `output_size` | Line count, plus "part i of n" when the output has several segments |
 | `chunks` | `{ "chunk_1": "…", "chunk_2": "…" }` with chunk numbers counted across the whole output |
 

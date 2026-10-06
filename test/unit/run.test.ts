@@ -120,6 +120,24 @@ test("collectRun skips errors, images, excluded tools, short and distilled resul
 	);
 });
 
+test("collectRun includes error results when distillErrors is set", () => {
+	const entries = [
+		user("q"),
+		assistant("", [{ id: "a", name: "bash", arguments: {} }, { id: "b", name: "bash", arguments: {} }]),
+		toolResult("a", "bash", big, "failed", { isError: true }),
+		toolResult("b", "bash", big, "ok"),
+		assistant("done"),
+	];
+	const run = collectRun(entries, { ...options, distillErrors: true });
+	assert.deepEqual(
+		run?.candidates.map((c) => [c.entryId, c.isError ?? false]),
+		[
+			["failed", true],
+			["ok", false],
+		],
+	);
+});
+
 test("collectRun falls back to the tool call name when the result has no toolName", () => {
 	const entries = [
 		user("q"),

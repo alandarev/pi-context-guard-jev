@@ -63,6 +63,24 @@ test("renderReplacement maps read offsets to file lines", () => {
 	assert.match(noOffset.text, /\(lines 1–\d+ of src\/big\.ts\)/);
 });
 
+test("renderReplacement does not count Pi's read note as file lines", () => {
+	const body = lines(30, "row", 40);
+	const text = `${body}\n\n[Showing lines 101-130 of 400. Use offset=131 to continue.]`;
+	const chunks = windowed(text);
+	const candidate = { entryId: "r", toolName: "read", args: { path: "src/big.ts", offset: 101 }, text };
+	// Keep only the first chunk: the omission ends at the last file line (130), not 132.
+	const first = renderReplacement(candidate, chunks, new Set([0]));
+	assert.match(first.text.split("\n").at(-1)!, /lines \d+–130 of src\/big\.ts\) …\]$/);
+	// Keep everything but the chunk(s) holding only the note: no omission line at all.
+	const noteOnly = chunks.filter((c) => c.start >= 30).map((c) => c.index);
+	const keepAllFile = new Set(chunks.map((c) => c.index).filter((i) => !noteOnly.includes(i)));
+	if (noteOnly.length > 0) assert.doesNotMatch(renderReplacement(candidate, chunks, keepAllFile).text, /omitted/);
+	// The "N more lines in file" variant is recognized too.
+	const more = `${body}\n\n[270 more lines in file. Use offset=131 to continue.]`;
+	const moreResult = renderReplacement({ ...candidate, text: more }, windowed(more), new Set([0]));
+	assert.match(moreResult.text.split("\n").at(-1)!, /lines \d+–130 of src\/big\.ts\) …\]$/);
+});
+
 test("renderReplacement lists files for omitted grep chunks", () => {
 	const files = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts", "g.ts", "h.ts"];
 	const text = grepOutput(files, 5, 40);

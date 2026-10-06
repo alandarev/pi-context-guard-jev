@@ -69,6 +69,10 @@ export function buildRequest(
 	state.final_answer = clip(run.answer, ANSWER_LIMIT);
 	if (run.notes.trim()) state.agent_notes_during_the_run = clip(run.notes, NOTES_LIMIT);
 	state.tool = candidate.toolName;
+	if (candidate.isError) {
+		state.tool_status =
+			"failed (the tool reported an error, e.g. a non-zero exit code). If final_answer shows the agent got past this failure, its details are usually no longer needed.";
+	}
 	const args = describeArgs(candidate.args);
 	if (args) state.tool_arguments = args;
 	state.output_size = `${totalLines} lines${segmentCount > 1 ? `; this is part ${segmentIndex + 1} of ${segmentCount}` : ""}`;

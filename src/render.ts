@@ -28,27 +28,39 @@ export function toolLabel(candidate: Pick<Candidate, "toolName" | "args">): stri
 	return candidate.toolName;
 }
 
-/** For `read`, map output line indexes to file line numbers using its `offset` argument. */
-function lineOffset(candidate: Pick<Candidate, "toolName" | "args">): { base: number; file?: string } {
-	if (candidate.toolName !== "read") return { base: 1 };
+/** Pi's `read` appends a blank line and a continuation note ("[Showing lines …]", "[N more lines in file …]"). */
+const READ_NOTE = /\n\n\[(?:Showing lines \d+-\d+ of \d+[^\]\n]*|\d+ more lines in file)\. Use offset=\d+ to continue\.\]$/;
+
+/**
+ * For `read`, map output line indexes to file line numbers using its `offset` argument.
+ * `fileLines` is the number of output lines that are file content (excluding Pi's trailing note).
+ */
+function lineOffset(candidate: Pick<Candidate, "toolName" | "args" | "text">, totalLines: number): { base: number; file?: string; fileLines: number } {
+	if (candidate.toolName !== "read") return { base: 1, fileLines: totalLines };
 	const offset = candidate.args?.offset;
 	const path = candidate.args?.path;
-	return { base: typeof offset === "number" && offset >= 1 ? Math.floor(offset) : 1, file: typeof path === "string" ? path : undefined };
+	return {
+		base: typeof offset === "number" && offset >= 1 ? Math.floor(offset) : 1,
+		file: typeof path === "string" ? path : undefined,
+		fileLines: READ_NOTE.test(candidate.text) ? Math.max(0, totalLines - 2) : totalLines,
+	};
 }
 
-function omissionLine(candidate: Pick<Candidate, "toolName" | "args">, removed: readonly Chunk[]): string {
+/** One line describing a run of removed chunks, or undefined if it holds only Pi's read note. */
+function omissionLine(candidate: Pick<Candidate, "toolName" | "args" | "text">, removed: readonly Chunk[], totalLines: number): string | undefined {
 	const first = removed[0];
 	const last = removed[removed.length - 1];
-	const lines = last.end - first.start;
 	const files = [...new Set(removed.flatMap((chunk) => chunk.files))];
 	if (files.length > 0) {
 		const shown = files.slice(0, 5).join(", ");
 		const more = files.length > 5 ? ` and ${files.length - 5} more` : "";
-		return `[… ${plural(lines, "line")} omitted: matches in ${shown}${more} …]`;
+		return `[… ${plural(last.end - first.start, "line")} omitted: matches in ${shown}${more} …]`;
 	}
-	const { base, file } = lineOffset(candidate);
-	const range = `lines ${first.start + base}–${last.end - 1 + base}`;
-	return `[… ${plural(lines, "line")} omitted (${file ? `${range} of ${file}` : `output ${range}`}) …]`;
+	const { base, file, fileLines } = lineOffset(candidate, totalLines);
+	const end = Math.min(last.end, fileLines);
+	if (end <= first.start) return undefined;
+	const range = `lines ${first.start + base}–${end - 1 + base}`;
+	return `[… ${plural(end - first.start, "line")} omitted (${file ? `${range} of ${file}` : `output ${range}`}) …]`;
 }
 
 const recallHint = (entryId: string): string => `Full output: recall({"entryId":"${entryId}"}).`;
@@ -81,7 +93,8 @@ export function renderReplacement(
 	let keptLines = 0;
 	let keptChars = 0;
 	const flush = () => {
-		if (removed.length > 0) body.push(omissionLine(candidate, removed));
+		const line = removed.length > 0 ? omissionLine(candidate, removed, totalLines) : undefined;
+		if (line) body.push(line);
 		removed = [];
 	};
 	for (const chunk of chunks) {

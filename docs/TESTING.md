@@ -139,6 +139,50 @@ node test/e2e/run-e2e.mjs --model openai-codex/gpt-6-luna --scenario history --c
 
 See [CACHE.md](CACHE.md) for what the cache numbers mean.
 
+## Real-world examples (`examples.mjs`)
+
+The README's "Examples (measured)" section comes from `test/e2e/examples.mjs`. It runs the same prompts on
+real public code twice, with context-guard on and with it off (`--no-guard`), and compares the first
+request of the follow-up turn.
+
+```bash
+node test/e2e/examples.mjs                      # all examples, at most 4 Pi runs at once
+node test/e2e/examples.mjs --only A --models gpt # a subset
+node test/e2e/examples.mjs --jobs 2
+```
+
+| Example | Workspace (a temp copy) | Turn 1 | Turn 2 | Correct when | Models |
+|---|---|---|---|---|---|
+| A. code search | The installed Pi package: `dist/` without `*.map` and `dist/bundle/` (one-line minified duplicates), plus `docs/` | "Where does Pi decide to auto-compact…? Start with `rg -n -i compact dist docs`…" | "Which of those settings can a user change, and what are their defaults?" | Names `enabled`, 16384 and 20000 | GPT-6 Luna, Claude Sonnet 5.5 |
+| B. test log | This repository (`src/`, `test/unit/`, configs; `node_modules` symlinked; a git repo) with one off-by-one in `src/render.ts` (3 tests fail) | "Run node --test --test-reporter=spec test/unit/*.test.ts…" | "Now fix it and rerun only the failing test file." | `render` and `extension` tests pass afterwards | GPT-6 Luna |
+| C. large file | As A | "Read dist/core/agent-session.js completely…" | Quote the exact error thrown when a prompt arrives during compaction (not mentioned in turn 1's answer) | The answer contains the exact message | GPT-6 Luna |
+
+Each run gets its own workspace, session id and `PI_CONTEXT_GUARD_CONFIG` file (defaults). The Pi package is
+public (npm); nothing private is sent to OpenRouter. Example B also records the test log's size
+(`testLogChars`, which must be ≥ 8,000 to be a fair example; it was 14.4k).
+
+Output: `test/e2e/out/examples-<stamp>/` with `results.md` (the table), `results.json`, and one directory per
+run (`A-claude-on`, …) holding `summary.json` (per turn: tool calls, tool-result sizes, edits with kept/total
+lines, Jev records, the first request's input/cacheRead/cacheWrite, main-model cost from Pi's usage, the
+answer), the raw events, the captured payloads, and `turn-N.edit-K.txt`: the exact replacement text the
+model saw.
+
+**Cost of a full run** (8 Pi runs, measured once): Jev $0.0055 in total; main models $0.26 as computed by
+Pi from list prices (most of it Claude in example A; GPT runs used a subscription). About 5 minutes with 4
+parallel jobs.
+
+**Findings of the first full run** (details in the README):
+
+- Next-request context, on / off: A Claude 15.5k / 28.2k tokens, A GPT 11.5k / 34.3k, C GPT 9.2k / 35.3k;
+  all follow-ups correct, none needed `recall`.
+- The first request after an edit cost more with the guard on (cache rewrite): A Claude $0.033 / $0.016.
+- B was not distilled at all: the failing test command is an error result, which context-guard then never
+  edited. Fixed by `distillErrors` (default on); a rerun distilled the log 15.8k → 8.6k chars, keeping the
+  3 failures with their assertion messages, and turn 2 still fixed the bug.
+- In C, `read` outputs carry Pi's two-line "[Showing lines …]" note, so omission ranges at the end of a piece
+  named two line numbers past the file lines (e.g. "lines 466–502" of a 1–500 read). Fixed: ranges are now
+  clamped to the file lines and a removed note gets no omission line.
+
 ## Manual TUI check (tmux)
 
 This checks the status bar, the working message and `/guard` in the real interactive UI.

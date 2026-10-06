@@ -9,6 +9,12 @@ test("normalizeConfig returns defaults for non-objects", () => {
 	for (const raw of [undefined, null, 42, "x", [1, 2]]) assert.deepEqual(normalizeConfig(raw), DEFAULT_CONFIG);
 });
 
+test("distillErrors defaults to true and accepts booleans only", () => {
+	assert.equal(normalizeConfig({}).distillErrors, true);
+	assert.equal(normalizeConfig({ distillErrors: false }).distillErrors, false);
+	assert.equal(normalizeConfig({ distillErrors: "no" }).distillErrors, true);
+});
+
 test("normalizeConfig returns a fresh excludeTools array", () => {
 	const config = normalizeConfig({});
 	config.excludeTools.push("bash");

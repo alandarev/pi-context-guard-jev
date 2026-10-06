@@ -39,6 +39,8 @@ export interface GuardConfig {
 	maxChunksPerSegment: number;
 	/** Tool names whose results are never distilled. */
 	excludeTools: string[];
+	/** Also distill error results, e.g. the log of a failing test or build command. */
+	distillErrors: boolean;
 	/**
 	 * Earlier exchanges (user prompt + final assistant text) shown to Jev, so it judges relevance
 	 * against the ongoing work too. 0 sends no earlier conversation at all (no summary either).
@@ -64,6 +66,7 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	maxSegmentChars: 32_000,
 	maxChunksPerSegment: 40,
 	excludeTools: ["edit", "write"],
+	distillErrors: true,
 	historyExchanges: 3,
 	pinAnthropicCache: true,
 };
