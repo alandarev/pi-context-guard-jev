@@ -55,13 +55,15 @@ system are read, and the whole history is written again.
 In `before_provider_request`, for models with `api === "anthropic-messages"` (when `enabled` and
 `pinAnthropicCache` are on):
 
-1. Find Pi's rolling `cache_control` (the last one in `messages`) and copy it, including `ttl`, so TTL
-   ordering stays valid. Without one, do nothing.
+1. Find Pi's rolling `cache_control` (the last one in `messages`). Without one, caching is off: do nothing.
 2. Skip trailing mid-conversation `system` messages (effort or tool changes). Then find the most recent user
    message with text that is **not** the last message. Tool-result-only user messages do not count. This is
    the run's question during a run, and the previous question on the first request of a new prompt.
-3. Put the copied `cache_control` on that message's last text block (string content is converted to one
-   text block first). If it already has one, leave it.
+3. Put a `cache_control` on that message's last text block (string content is converted to one text block
+   first). If it already has one, leave it. The TTL must keep Anthropic's order (every breakpoint before it
+   at least as long, every one after it no longer): the rolling breakpoint's TTL is used when that holds,
+   otherwise the other TTL; if neither fits, nothing is pinned (`ttl-conflict`). Pi itself always uses one
+   TTL for every breakpoint, so in practice the pin copies it.
 4. If that makes more than 4 breakpoints, remove the breakpoint from `system[0]` (the OAuth identity block).
    The `system[1]` breakpoint covers that prefix too.
 5. If it is still more than 4, undo everything and leave the payload as Pi built it.

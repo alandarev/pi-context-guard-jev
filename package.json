@@ -4,6 +4,15 @@
   "description": "Pi extension: after each run, the Jev classifier distills large tool outputs down to what the answer needs (append-only context edits, cache-aware), with savings in the status bar.",
   "type": "module",
   "license": "MIT",
+  "author": "alandarev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alandarev/pi-context-guard-jev.git"
+  },
+  "homepage": "https://github.com/alandarev/pi-context-guard-jev#readme",
+  "bugs": {
+    "url": "https://github.com/alandarev/pi-context-guard-jev/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",

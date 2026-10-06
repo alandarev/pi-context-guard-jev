@@ -54,7 +54,9 @@ Hooks used:
 ### 1. Run span
 
 `collectRun` walks back through `event.context.contextEntries` (Pi's projected entries) to the last entry
-that has a user message with text. That text is the **question**. Everything after it is the run. Assistant
+that has a user message, with or without text. Its text is the **question**; a prompt with only an image
+gets the placeholder `[the user sent only an image]`, so an older question is never reused. Everything
+after it is the run. Assistant
 text in the run gives the **answer** (the last text) and the **notes** (all earlier text). Tool calls are
 indexed by id so each result can be matched with its tool name and arguments.
 
@@ -66,7 +68,9 @@ A tool result in the span is a candidate if all of these hold:
 - it is not an error and has only text blocks (no images),
 - its tool is not in `excludeTools` (`edit`, `write`),
 - its model-visible text has at least `minResultChars` (4,000) characters,
-- it does not start with `[context-guard]`, meaning it was not distilled already.
+- it does not start with `[context-guard]`, meaning it was not distilled already,
+- its model-visible text equals the raw entry's text. A result another extension already edited is left
+  alone: `recall` returns the raw entry, so anything that edit added could not be recovered.
 
 The run is skipped without any Jev request if there are no candidates, or if their total length is below
 `minRunChars` (8,000).
@@ -91,7 +95,8 @@ separators) and at least 60% of them look like `path:line:` or `path-line-`. Suc
 window, the window ends after it. A single line longer than the target becomes its own chunk.
 
 **Segments.** Consecutive chunks are grouped into segments of at most `maxSegmentChars` (40,000)
-characters and `maxChunksPerSegment` (40) chunks. A chunk larger than the limit gets a segment of its own.
+characters and `maxChunksPerSegment` (40) chunks. A chunk larger than the limit (one huge line) gets a
+segment of its own, which is **never sent**: it is kept as it is, with reason `oversize`.
 Jev's context window is 32k tokens. Code is about 2.3 characters per token, and a measured 30k-character grep
 with 30 questions came to 13,155 input tokens, so 40,000 characters leaves room for the state and the
 questions.
@@ -149,10 +154,12 @@ In this order:
 
 - Segments run through a pool of `concurrency` (6) parallel requests.
 - `timeoutMs` (8,000) is the budget for **all** requests of the run. Each request also gets it as its own
-  timeout, with one retry. When the budget runs out, no new requests start and running ones are aborted.
-  A response that still arrives normally is used.
+  timeout, with one retry. When the budget runs out, no new requests start, running ones are aborted, and
+  each request is raced against the deadline, so a provider that ignores the abort cannot hold up settling.
+  An answer that arrives after the deadline is ignored.
 - Unstarted, aborted and failed segments keep their chunks (reason `timeout` or `error`).
-- If the parent signal (`ctx.signal`) aborts, the run stops the same way.
+- If the parent signal (`ctx.signal`) aborts, the run stops the same way. In Pi 1.0.3 the agent's signal is
+  usually already cleared at this boundary, so Esc does not cancel it; the time budget is the limit.
 - An exception from the whole pass shows a warning and leaves the run untouched.
 
 ## Replacement format (`render.ts`)
@@ -210,7 +217,10 @@ So the numbers follow branches, `/tree`, reloads and compaction.
 
 `recall` reads the raw entry with `ctx.sessionManager.getEntry(entryId)`. `context_edit` never changes that
 entry. The tool returns the whole text, or only lines that match `pattern` (with line numbers), or an
-`offset`/`limit` window. Output is capped at 2,000 lines and 50 KB, with a continuation note. An id that is
+`offset`/`limit` window. Output is capped at 2,000 lines and 50 KB, with a continuation note; a single
+line longer than 50 KB is cut with a `[line N cut at 50KB]` note. `pattern` is a JavaScript regex of at most
+500 characters, matched against the first 4,000 characters of each line inside a `node:vm` sandbox with a
+1-second timeout, so a catastrophic pattern returns an error instead of freezing Pi. An id that is
 not a tool result gives an error that tells the model to use the id from a `[context-guard]` header.
 
 ## Pitfalls

@@ -13,20 +13,20 @@ These need Node ≥ 22.18, which runs the `.ts` files directly. There is no netw
 
 | File | Covers |
 |---|---|
-| `run.test.ts` | Run span, question/answer/notes, candidate rules (errors, images, excluded tools, short and already-distilled results), steering messages |
+| `run.test.ts` | Run span (including image-only prompts), question/answer/notes, candidate rules (errors, images, excluded tools, short, already-distilled and other-extension-edited results), steering messages |
 | `chunk.test.ts` | grep detection, grouping by file, context lines and `--`, `-digits-` file names, split/merge rules, plain-text windows, segment limits |
 | `decide.test.ts` | Request shape; the decision order (error, missing answers, `keep_whole`, strong/weak `whole`, chunks, `none`); `citedFiles` |
-| `distill.test.ts` | Skips, edits, `removed`, `not-worth`, failures, time budget, parent abort, concurrency limit, multi-segment outputs, `keepCitedFiles`, usage sums |
+| `distill.test.ts` | Skips, edits, `removed`, `not-worth`, failures, time budget (including a classifier that never answers and late answers), parent abort, concurrency limit, multi-segment outputs, oversize segments never sent, `keepCitedFiles`, usage sums |
 | `render.test.ts` | Labels, verbatim chunks with omission lines, `read` offsets, file lists, full removal |
-| `cache-pin.test.ts` | API-key and OAuth payloads, trailing system messages, TTL copy, string content, tool-result-only messages, over-budget restore |
+| `cache-pin.test.ts` | API-key and OAuth payloads, trailing system messages, TTL selection and `ttl-conflict`, string content, tool-result-only messages, over-budget restore |
 | `stats.test.ts` | Savings from the projection, run records, status texts and colours, cost format |
-| `recall.test.ts` | Original output, pattern, offset/limit, line and byte caps |
+| `recall.test.ts` | Original output, pattern (length cap, 4,000-char match window, catastrophic-regex timeout), offset/limit, line and byte caps, oversized lines |
 | `config.test.ts` | Defaults, validation and ranges, `provider/id` parsing, load/save round trip |
 | `extension.test.ts` | The real entry point (see below) |
 
 `extension.test.ts` loads `src/index.ts` through **Pi's own extension loader** (`loadExtensions` from the
 `@earendil-works/pi-coding-agent` devDependency), then drives the handlers with a fake `ctx`. It sets
-`PI_CODING_AGENT_DIR` to a temporary directory, so `/guard on|off` never touches the real
+`PI_CODING_AGENT_DIR` and `PI_CONTEXT_GUARD_CONFIG` to a temporary directory, so `/guard on|off` never touches the real
 `~/.pi/agent/context-guard.json`. It checks that the handlers, tool and command are registered, that drafts
 are appended after other extensions' drafts, that unfinished runs and a missing model are ignored, that the
 pin applies only to `anthropic-messages`, that `recall` works, and that `/guard off|on` persists.

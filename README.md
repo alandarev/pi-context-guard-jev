@@ -101,7 +101,7 @@ Every distilled result starts with `[context-guard]` and ends its header with
 | Parameter | Meaning |
 |---|---|
 | `entryId` (required) | The entry id from the header |
-| `pattern` | JavaScript regex; returns only matching lines, prefixed with their line numbers |
+| `pattern` | JavaScript regex (≤ 500 chars, 1 s limit); returns only matching lines, prefixed with their line numbers |
 | `offset` | First line to return, 1-based. When `pattern` is set, this counts matching lines. |
 | `limit` | Most lines to return |
 
@@ -145,7 +145,8 @@ Example:
 - results of excluded tools (`edit`, `write` by default)
 - results shorter than `minResultChars`, and runs below `minRunChars`
 - aborted or failed runs
-- results that are already distilled
+- results that are already distilled, or that another extension already edited
+- single lines too long for one Jev request (kept as they are)
 - earlier runs: only the run that just finished is edited
 
 ## Limitations
