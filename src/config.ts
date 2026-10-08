@@ -80,6 +80,11 @@ export interface GuardConfig {
 	exchangeBreakEven: boolean;
 	/** A pass omits exchanges only if they save at least this many characters together (when that costs a cache rewrite). */
 	exchangeMinSavingChars: number;
+	/**
+	 * Remove images from tool results once they are this many turns old (assistant messages after the
+	 * result); `recall` shows them again. Images in user messages are always kept. 0 turns this off.
+	 */
+	imageKeepTurns: number;
 }
 
 export const DEFAULT_CONFIG: GuardConfig = {
@@ -114,6 +119,7 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	exchangeOmitThreshold: 0.2,
 	exchangeBreakEven: true,
 	exchangeMinSavingChars: 8_000,
+	imageKeepTurns: 3,
 };
 
 const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
@@ -138,9 +144,10 @@ const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
 	keepRecentExchanges: [0, 100],
 	exchangeOmitThreshold: [0, 1],
 	exchangeMinSavingChars: [0, 10_000_000],
+	imageKeepTurns: [0, 1_000],
 };
 
-const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges", "midRunMinAgeTurns", "midRunBatchChars", "midRunBatchCharsOpenAI", "smallResultMinChars", "keepRecentExchanges", "exchangeMinSavingChars"]);
+const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges", "midRunMinAgeTurns", "midRunBatchChars", "midRunBatchCharsOpenAI", "smallResultMinChars", "keepRecentExchanges", "exchangeMinSavingChars", "imageKeepTurns"]);
 
 /** Merge untrusted JSON over the defaults, keeping only well-typed, in-range values. */
 export function normalizeConfig(raw: unknown): GuardConfig {

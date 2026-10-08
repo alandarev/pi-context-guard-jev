@@ -16,8 +16,9 @@ import { join } from "node:path";
 import { buildSessionProjection } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js";
 import { BREAK_EVEN_FACTOR, charsFrom, collectCheckpoint, contextChars, exchangeMemo, memoFromBranch, paysOff } from "../../src/checkpoint.ts";
 import { loadConfig } from "../../src/config.ts";
+import { collectImages } from "../../src/images.ts";
 import { collectExchanges, collectSmall } from "../../src/items.ts";
-import { collectRun, findRunStart } from "../../src/run.ts";
+import { collectRun, findRunStart, lastUserIndex } from "../../src/run.ts";
 import { CUSTOM_TYPE } from "../../src/stats.ts";
 import type { ProjectedEntryLike } from "../../src/types.ts";
 
@@ -107,23 +108,40 @@ for (let i = Math.max(1, from); i < entries.length; i++) {
 		if (img) { imageResults++; imageResultText += t; } else { textResults++; textChars += t; }
 		if (m.isError) errorResults++;
 	}
-	let verdict: string;
-	if (outputChars + exchangeChars < config.midRunBatchChars) verdict = `below batch (${k(outputChars + exchangeChars)} < ${k(config.midRunBatchChars)})`;
-	else {
-		const outputIds = new Set([...info.candidates.map((c) => c.entryId), ...small.map((s) => s.entryId)]);
-		const allIds = new Set([...outputIds, ...exchanges.map((x) => x.entryId)]);
-		const turns = info.currentTurn + 1;
-		// Anthropic without a trusted read point: everything after the question (or all, if an exchange is edited).
-		const rewrite = (ids: Set<string>) => {
-			const earliest = projection.findIndex((p) => ids.has(p.sourceEntry.id));
-			return contextChars(projection.slice(earliest >= 0 && earliest <= runStart ? 0 : runStart + 1));
-		};
-		const rwAll = rewrite(allIds), rwOut = rewrite(outputIds);
-		const okAll = paysOff(outputChars + exchangeChars, turns, rwAll, BREAK_EVEN_FACTOR.prefix);
-		const okOut = outputChars >= config.midRunBatchChars && paysOff(outputChars, turns, rwOut, BREAK_EVEN_FACTOR.prefix);
-		verdict = okAll ? "CHECKPOINT (all)" : okOut ? "CHECKPOINT (outputs)" : `break-even fails: ${k(outputChars + exchangeChars)}×${turns}=${k((outputChars + exchangeChars) * turns)} vs 16×${k(rwAll)}=${k(16 * rwAll)}; outputs ${k(outputChars)}×${turns} vs 16×${k(rwOut)}=${k(16 * rwOut)} (charsFrom ${k(charsFrom(projection, outputIds))})`;
+	// Same tiers as index.ts (turn_end): all; without exchanges; without images from before the pin.
+	const images = collectImages(projection, config.imageKeepTurns);
+	const pin = lastUserIndex(projection);
+	const imageChars = (list: typeof images) => list.reduce((n, i) => n + i.beforeChars - i.afterChars, 0);
+	const tiers = [
+		{ name: "all", exchanges, images },
+		{ name: "no exchanges", exchanges: [] as typeof exchanges, images },
+		{ name: "run images", exchanges: [] as typeof exchanges, images: images.filter((i) => i.index > pin) },
+	];
+	const outputIds = [...info.candidates.map((c) => c.entryId), ...small.map((s) => s.entryId)];
+	const turns = info.currentTurn + 1;
+	// Anthropic without a trusted read point: everything after the pin (or all, if an earlier entry is edited).
+	const rewrite = (ids: Set<string>) => {
+		const earliest = projection.findIndex((p) => ids.has(p.sourceEntry.id));
+		return contextChars(projection.slice(earliest >= 0 && earliest <= pin ? 0 : pin + 1));
+	};
+	let verdict = "";
+	const tried: string[] = [];
+	for (const tier of tiers) {
+		const chars = outputChars + imageChars(tier.images) + tier.exchanges.reduce((n, x) => n + x.chars, 0);
+		if (chars < config.midRunBatchChars) {
+			tried.push(`${tier.name}: below batch ${k(chars)}`);
+			continue;
+		}
+		const ids = new Set([...outputIds, ...tier.images.map((i) => i.entryId), ...tier.exchanges.map((x) => x.entryId)]);
+		const rw = rewrite(ids);
+		if (paysOff(chars, turns, rw, BREAK_EVEN_FACTOR.prefix)) {
+			verdict = `CHECKPOINT (${tier.name}: ${k(chars)}, images ${tier.images.length}/${k(imageChars(tier.images))})`;
+			break;
+		}
+		tried.push(`${tier.name}: ${k(chars)}×${turns} vs 16×${k(rw)}`);
 	}
-	const line = `${head} turn=${info.currentTurn} results=${toolResults} (text ${textResults}/${k(textChars)}, image ${imageResults}, err ${errorResults}) large=${info.candidates.length}/${k(info.pendingChars)} small=${small.length} ex=${exchanges.length}/${k(exchangeChars)} | ${verdict}`;
+	if (!verdict) verdict = tried.every((t) => t.includes("below batch")) ? `below batch (${tried.join("; ")})` : `break-even fails (${tried.join("; ")})`;
+	const line = `${head} turn=${info.currentTurn} results=${toolResults} (text ${textResults}/${k(textChars)}, image ${imageResults}, err ${errorResults}) large=${info.candidates.length}/${k(info.pendingChars)} small=${small.length} ex=${exchanges.length}/${k(exchangeChars)} oldImages=${images.length}/${k(imageChars(images))} | ${verdict}`;
 	if (showAll || line.split("|")[1] !== lastLine) log(line);
 	const run = runOf(projection[runStart]?.sourceEntry.id ?? "?");
 	run.turns++;

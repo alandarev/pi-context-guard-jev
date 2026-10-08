@@ -15,11 +15,13 @@ evidence behind the thresholds are in [JEV.md](JEV.md). Cache behaviour is in [C
 | `src/decide.ts` | `buildRequest` (the run-end Jev request), `buildCheckpointRequest` (the mid-run one) and `interpret` (answers → keep set); `citedFiles` |
 | `src/distill.ts` | `distillRun`: chunk, run Jev requests in parallel within a time budget, decide per result, build `context_edit` drafts |
 | `src/items.ts` | Whole items: small outputs (`collectSmall`) and old exchanges (`collectExchanges`), their Jev requests, stubs and edits, and `judgeItems` (batched, parallel, time budget) |
-| `src/process.ts` | `processItems`: large outputs, small outputs and old exchanges of one pass, judged in parallel and merged into one list of edits and records |
+| `src/process.ts` | `processItems`: large outputs, small outputs and old exchanges of one pass, judged in parallel and merged into one list of edits and records; `addImages` adds the image removals |
+| `src/images.ts` | Old images: `collectImages` (tool results with images at least `imageKeepTurns` old), their stub and replacement |
+| `src/size.ts` | Context size in text characters: images by pixels (width × height ÷ 750 tokens × 4), thinking signatures at half, image headers (PNG/JPEG/GIF/WebP) |
 | `src/render.ts` | The replacement text: header, verbatim chunks, omission lines; the `[context-guard]` marker |
 | `src/cache-pin.ts` | Anthropic breakpoints: the previous user question, and the read point after edits (`placeGuardBreakpoints`) |
 | `src/stats.ts` | Savings and Jev usage computed from the session; status-bar text |
-| `src/recall.ts` | The text returned by `recall` (a tool output, or the transcript of an omitted exchange) |
+| `src/recall.ts` | What `recall` returns (a tool output with its images, or the transcript of an omitted exchange with its user images) |
 | `src/types.ts` | Loose structural types for the Pi objects used, so the pure modules can be tested without Pi |
 
 Everything except `index.ts` is pure. `distillRun` gets the classifier as an injected function.
@@ -224,8 +226,9 @@ assistant messages, tool calls and results, custom messages such as subagent not
 exchanges before the current run's user message, without the last `keepRecentExchanges` (2) before it,
 that completed (their last assistant message has no tool calls; a steering message belongs to the exchange
 it was sent in), that are not already omitted (their prompt shows the stub), that were not judged during the
-current run (`exchangeMemo`: exchange results in records after the run's prompt, except deferred ones), and that can be recovered and are worth it: no message with an image, no entry whose model-visible
-content differs from the raw entry for any reason other than our own marker (another extension's edit,
+current run (`exchangeMemo`: exchange results in records after the run's prompt, except deferred ones), and that can be recovered and are worth it: no entry whose model-visible
+content differs from the raw entry for any reason other than our own marker (images are fine: `recall` returns
+them) (another extension's edit,
 or an omission by someone else, which Pi keeps in the projection as an entry with no messages), at least
 2,000 characters of editable content, and a stub shorter than that content. A kept exchange is
 judged again in a later run, against that run's work. Compaction and branch summaries are never part of an
@@ -255,6 +258,22 @@ far (model-visible assistant messages). Otherwise they are deferred: their edits
 say `kept` / `deferred`, and they are judged again at later run ends against the work of that run, so
 deferred exchanges accumulate until their total pays off. `exchangeBreakEven: false` always omits
 unrelated exchanges.
+
+**Old images** (`images.ts → collectImages`, `imageKeepTurns`, 3). Every tool result in the projection,
+earlier runs included, whose model-visible content has images and that at least `imageKeepTurns` assistant
+messages follow. Skipped: user messages (the images you send are usually the spec), results another extension
+changed (text or image count differs from the raw entry), and results whose images are already gone. No Jev
+request: Jev reads text only, and a model reacts to an image in its next message, whose text stays. The
+replacement is a text-only content: the stub
+`[context-guard] Removed 1 image from this output (1280×960; ~1.6k tokens), 4 turns old. recall({"entryId":"…"}) shows it again.`
+followed by the result's own text blocks. Because the stub leads, the result counts as ours (`editedByOthers`
+is false, stats count it), and as already distilled (its text is not judged again). Its size before and after
+uses `size.ts` (an image is width × height ÷ 750 tokens, 4 characters per token; header unreadable: 1,600
+tokens; at most 6,700). Records have `kind: "image"`, `requests: 0`, reason `N turns old`. When Jev is
+unavailable, a pass still removes images. At run end, images from before the run's prompt go through the
+same marginal-cost gate as exchanges (`exchangeBreakEven`, with no minimum saving); deferred ones are just
+collected again next time. Mid-run, images count towards the batch; the tiers are: everything; without
+exchanges; without exchanges and images from before the last user message.
 
 **Batching.** Whole items are grouped into requests of at most `maxSegmentChars` characters of item text and
 `maxChunksPerSegment` (40) items, under the same `timeoutMs` budget; the three kinds run at the same time,
@@ -411,27 +430,33 @@ The extension does not write Jev's usage into Pi's own usage entries. It is reco
 Nothing is kept in memory. Every redraw recomputes from the session:
 
 - **Savings:** Pi's session projection (`buildSessionProjection()`) is checked for tool results whose
-  model-visible text starts with `[context-guard]` while the raw entry does not; each one adds raw length
-  minus visible length. A prompt that shows the exchange stub adds the raw length of its exchange (the
-  prompt and the entries up to the next user message that the model no longer sees: Pi keeps an omitted
+  model-visible text starts with `[context-guard]` while the raw entry does not; each one adds raw size
+  minus visible size (`size.ts`: text length, images by pixels). Results that lost only their images count
+  as image results. A prompt that shows the exchange stub adds the raw size of its exchange (the
+  prompt and the entries up to the next prompt that the model no longer sees: Pi keeps an omitted
   entry in the projection with no messages) minus the stub.
   Tokens are estimated as characters ÷ 4.
-- **Jev usage:** the `context-guard` records on the active branch (`getBranch()`) are summed.
+- **Lifetime:** the `savedChars` of every `context-guard` record on the active branch, and whether a
+  compaction came after a record that saved something (`compacted`).
+- **Jev usage:** the same records are summed.
 
 So the numbers follow branches, `/tree`, reloads and compaction.
 
-The ready-state footer is `🛡 −4.2k · 1`: ≈ tokens kept out of context · distilled outputs plus omitted
-exchanges (the first part
-in the theme's success colour, the rest dimmed). Before anything is distilled it shows `🛡 0 saved`.
+The ready-state footer is `🛡 −4.2k · 1`: ≈ tokens kept out of context · distilled outputs, outputs without
+their images and omitted exchanges (the first part in the theme's success colour, the rest dimmed). Before
+anything is distilled it shows `🛡 0 saved`. After a compaction dropped earlier edits it adds the lifetime
+total: `🛡 0 · Σ−79k`, or `🛡 −4.2k · 3 · Σ−83k` once new edits exist (only when Σ is larger).
 
 ## Recall
 
 `recall` reads the raw entry with `ctx.sessionManager.getEntry(entryId)`. `context_edit` never changes that
-entry. For a tool result it returns the output; for a user prompt (the stub of an omitted exchange) it
+entry. For a tool result it returns the output and its images (image blocks after the text, at most 6, only
+for a plain recall: with `pattern` or `offset` a note says how many there are); for a user prompt (the stub of an omitted exchange) it
 returns a transcript of the raw exchange from the branch: `## user`, `## assistant` with the text and
 `[tool call] name {arguments}` lines, `## tool result (tool)` and `## custom message (type)` sections, for
-exactly the entries the latest record lists as `omitted` (without such a record, up to the next user
-message). The tool returns the whole text, or only lines that match `pattern` (with line numbers), or an
+exactly the entries the latest record lists as `omitted` (without such a record, up to the next prompt).
+Images of the exchange's user messages are attached (at most 6); a tool result's images are named with a
+`recall({"entryId":…})` line for that result. The tool returns the whole text, or only lines that match `pattern` (with line numbers), or an
 `offset`/`limit` window. Output is capped at 2,000 lines and 50 KB, with a continuation note; a single
 line longer than 50 KB is cut with a `[line N cut at 50KB]` note. `pattern` is a JavaScript regex of at most
 500 characters, matched against the first 4,000 characters of each line inside a `node:vm` sandbox with a

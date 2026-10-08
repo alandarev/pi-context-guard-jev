@@ -20,6 +20,7 @@ import {
 	smallStub,
 	type WorkContext,
 } from "./items.ts";
+import { type ImageItem, imageLabel } from "./images.ts";
 import { toolLabel } from "./render.ts";
 import type { RunInfo } from "./run.ts";
 import type { ClassifyFn, ContextEditDraft, OmitDraft } from "./types.ts";
@@ -142,6 +143,42 @@ export async function processItems(
 }
 
 
+
+export const emptyOutcome = (): ProcessOutcome => ({ edits: [], records: [], savedChars: 0, requests: 0, inputTokens: 0, costUsd: 0, ms: 0, timedOut: false });
+
+/** Add the removal of old images (no Jev request; images.ts) to `outcome`. */
+export function addImages(outcome: ProcessOutcome, items: readonly ImageItem[]): void {
+	for (const item of items) {
+		outcome.edits.push({ type: "context_edit", targetId: item.entryId, replacement: { content: item.replacement } });
+		outcome.records.push({
+			kind: "image",
+			entryId: item.entryId,
+			tool: item.toolName,
+			label: imageLabel(item),
+			outcome: "removed",
+			reason: `${item.age} turns old`,
+			beforeChars: item.beforeChars,
+			afterChars: item.afterChars,
+			keptLines: 0,
+			totalLines: 0,
+			chunks: 1,
+			requests: 0,
+			jev: [],
+		});
+		outcome.savedChars += item.beforeChars - item.afterChars;
+	}
+}
+
+/** Take image removals for `ids` back out of `outcome` (they stay eligible for a later pass). */
+export function dropImages(outcome: ProcessOutcome, ids: ReadonlySet<string>): void {
+	if (ids.size === 0) return;
+	outcome.edits = outcome.edits.filter((e) => !ids.has(e.targetId));
+	outcome.records = outcome.records.filter((r) => {
+		if (r.kind !== "image" || !ids.has(r.entryId)) return true;
+		outcome.savedChars -= r.beforeChars - r.afterChars;
+		return false;
+	});
+}
 
 /** Net characters the outcome's exchange omissions remove, and the entry ids they edit. */
 export function exchangeOmissions(outcome: ProcessOutcome): { savedChars: number; ids: Set<string> } {

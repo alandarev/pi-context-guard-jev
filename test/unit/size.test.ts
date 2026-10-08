@@ -61,7 +61,7 @@ test("an image counts by its pixels, not by its base64 length", () => {
 	const block = image(png(1280, 960), 110_000);
 	assert.equal(imageTokens(block), Math.ceil((1280 * 960) / 750));
 	assert.equal(blockChars(block), Math.ceil((1280 * 960) / 750) * IMAGE_CHARS_PER_TOKEN);
-	assert.ok(blockChars(block) < 6_000);
+	assert.ok(blockChars(block) < 7_000);
 	// Unreadable data: the default; huge images: the cap.
 	assert.equal(imageTokens({ type: "image", data: "@@@@" }), DEFAULT_IMAGE_TOKENS);
 	assert.equal(imageTokens(image(png(20_000, 20_000))), MAX_IMAGE_TOKENS);

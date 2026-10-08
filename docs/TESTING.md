@@ -21,7 +21,8 @@ These need Node ≥ 22.18, which runs the `.ts` files directly. There is no netw
 | `distill.test.ts` | Skips, edits, `removed`, `not-worth`, failures, time budget (including a classifier that never answers and late answers), parent abort, concurrency limit, multi-segment outputs, oversize segments never sent, `keepCitedFiles`, usage sums |
 | `render.test.ts` | Labels, verbatim chunks with omission lines, `read` offsets, file lists, full removal |
 | `cache-pin.test.ts` | Question pin: API-key and OAuth payloads, trailing system messages, TTL selection and `ttl-conflict`, string content, tool-result-only messages, over-budget restore. Anchors: question > read > write priority, read anchor inside a batch of tool_result blocks, breakpoint budget (identity and tools breakpoints dropped, then write, then read; the question survives a foreign breakpoint), not found / last message / already marked, normalized tool ids, TTL order, `markedToolResults` |
-| `stats.test.ts` | Savings from the projection, run records (checkpoints counted), status texts and colours, cost format |
+| `stats.test.ts` | Savings from the projection (images by pixels), run records (checkpoints counted), lifetime total and `compacted`, status texts (`🛡 0 · Σ−79k`) and colours, cost format |
+| `images.test.ts` | Old images: age rule, keep-turns 0/1/3, stub text and sizes, user images / already removed / foreign-edited results skipped |
 | `size.test.ts` | Image sizes from PNG/JPEG/GIF/WebP headers, image tokens by pixels (not base64 length), thinking and tool-call sizes, `contextChars` with screenshots |
 | `recall.test.ts` | Original output, pattern (length cap, 4,000-char match window, catastrophic-regex timeout), offset/limit, line and byte caps, oversized lines |
 | `config.test.ts` | Defaults, validation and ranges (incl. `historyExchanges` 0–10 integer and the `midRun*` settings), `provider/id` parsing, load/save round trip |
@@ -50,8 +51,13 @@ whole exchange, that `pruneExchanges: false` and `smallResultMinChars: 0` turn t
 break-even rule drops exchanges from a checkpoint batch that would not pay off with them. The run-end
 exchange gate: a small omission is deferred and the accumulated batch is omitted at a later run end; a big
 early exchange in a short session is deferred, and omitted with `exchangeBreakEven: false`; on OpenAI Codex
-an exchange rides along when the pass edits something else and is deferred when it does not. The fake
-session uses Pi's projection shape (an omitted entry stays with no messages).
+an exchange rides along when the pass edits something else and is deferred when it does not. Old images: run
+end removes images 3+ turns old with no Jev request (also with the model missing), `recall` returns them as
+image blocks (a pattern search only names them), nothing is removed twice; a checkpoint fills its batch with
+old images alone and still obeys break-even, `imageKeepTurns: 0` turns it off; images of an earlier run are
+deferred by the run-end gate and removed with `exchangeBreakEven: false`; `recall` of an omitted exchange
+attaches user images and names tool-result images. The fake session uses Pi's projection shape (an omitted
+entry stays with no messages).
 
 Test through Pi's loader (or `pi -e`), not a plain Node import of the extension. Plain Node imports of
 `@earendil-works/pi-coding-agent` can fail with `ERR_PACKAGE_PATH_NOT_EXPORTED`, even though Pi loads the
@@ -150,7 +156,13 @@ test/e2e/omit-probe.ts` omits the session's first exchange after turn 2 the way 
 sends a stub user message right before the next user message, without the omitted assistant and
 tool-result messages. Both GPT-6 Luna and Claude Sonnet 5.5 (`pi-claude-auth`) accepted it and answered.
 
-**Session replay.** `node test/e2e/replay-session.ts <session.jsonl> [--from N] [--all]` rebuilds Pi's
+**Old images, live** (2026-10-08, Claude Sonnet 5.5 with `pi-claude-auth`, ad-hoc): six 1200×800 PNGs read
+one per message, then a follow-up about the second one. Run end removed the four images 3–6 turns old with
+no Jev request (record `requests: 0`, 19.9k chars ≈ 5k tokens); the next request carried 2 images instead
+of 6 (input 14.1k → 9.5k tokens). Told not to read the file again, the model called
+`recall({"entryId":…})`, got the image back and read the code in it correctly.
+
+**Session replay.** `node test/e2e/replay-session.ts <session.jsonl> [--from N] [--all] [--summary]` rebuilds Pi's
 projection at every turn of a real session file and prints what the mid-run gates decide (run start, eligible
 large and small outputs, old exchanges, batch size, break-even) and the run-end candidates. No model calls,
 nothing leaves the machine. Without the live cache log it uses the question pin, so its break-even is the

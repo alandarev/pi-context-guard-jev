@@ -19,7 +19,7 @@ import {
 	textOf,
 } from "./types.ts";
 
-export type ItemKind = "large" | "small" | "exchange";
+export type ItemKind = "large" | "small" | "exchange" | "image";
 
 // ---------------------------------------------------------------------------------------------
 // Small outputs
@@ -100,11 +100,6 @@ const entryChars = (entry: ProjectedEntryLike): number => entry.messages.reduce(
 /** Exchanges smaller than this (model-visible characters) are never judged: the saving is not worth an edit. */
 export const EXCHANGE_MIN_CHARS = 2_000;
 
-const hasImage = (entry: ProjectedEntryLike): boolean =>
-	[...entry.messages, ...(entry.sourceEntry.message ? [entry.sourceEntry.message] : [])].some(
-		(m) => Array.isArray(m.content) && m.content.some((b) => b.type === "image"),
-	);
-
 /**
  * True when the model sees something other than the raw entry and the difference is not ours: another
  * extension (or Pi's overflow recovery) replaced or omitted it. `recall` returns raw entries, so whatever
@@ -139,8 +134,8 @@ export function collectExchanges(entries: readonly ProjectedEntryLike[], runStar
 		if (!isEditable(user) || judged.has(user.sourceEntry.id)) return;
 		const promptText = textOf(user.messages[0]);
 		if (promptText.startsWith(MARKER)) return; // already omitted
-		// Recoverability: recall returns raw entries as text, so no images and no foreign edits.
-		if (span.some((e) => hasImage(e) || editedByOthers(e))) return;
+		// Recoverability: recall returns raw entries (with their images, see recall.ts), so no foreign edits.
+		if (span.some(editedByOthers)) return;
 		const assistants = span.filter((e) => e.messages[0]?.role === "assistant");
 		const lastAssistant = assistants.at(-1)?.messages[0];
 		if (!lastAssistant || (Array.isArray(lastAssistant.content) && lastAssistant.content.some((b) => b.type === "toolCall"))) return;

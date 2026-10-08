@@ -39,6 +39,9 @@ pi install npm:pi-context-guard-jev     # needs an OpenRouter key: OPENROUTER_AP
   noise. Jev sees the task, the agent's progress or final answer, and the earlier conversation, and decides
   per chunk, per small output and per earlier exchange, so what the ongoing task needs survives. A failed
   command the agent already got past, or a file read made stale by a later edit, goes.
+- **Drops old screenshots.** A model looks at a screenshot once and goes on, but every later request
+  still sends it (about 1.6k tokens for 1280×960). Images in tool outputs are removed once they are 3 turns
+  old, with no Jev request; the text stays, and `recall` shows the images again.
 - **Works during long autonomous runs and in subagents.** Besides the end of each run, it checkpoints
   during long runs, once old output has piled up, so a 2-hour run or a long worker doesn't carry
   everything until it ends.
@@ -61,7 +64,8 @@ pi install npm:pi-context-guard-jev     # needs an OpenRouter key: OPENROUTER_AP
 ## How it works
 
 1. **A run finishes.** When Pi is about to settle a completed run (`agent_before_settle`), the extension
-   looks at the tool outputs of that run (everything after the last user message) and at earlier
+   looks at the tool outputs of that run (everything after the prompt that started it; messages you send
+   while it works join the run) and at earlier
    exchanges (steps 6 and 7). Long runs also get checkpoints before they end
    ([Long autonomous runs](#long-autonomous-runs)).
 2. **It picks large outputs.** These are text-only tool results of at least 4,000 characters, including
@@ -88,12 +92,19 @@ pi install npm:pi-context-guard-jev     # needs an OpenRouter key: OPENROUTER_AP
    touched. An unrelated exchange keeps a one-line note on its prompt
    (`[context-guard] Omitted an earlier exchange judged unrelated to the current work: "…" (N messages, ~Mk tokens). Full exchange: recall(…).`)
    and every other entry of it is omitted (`replacement: null`), so tool calls and their results always go
-   together. Exchanges with images, with entries another extension changed, or under 2,000 characters
-   are not judged. An omission early in the session makes the next request rewrite the prompt cache
+   together. Exchanges with entries another extension changed, or under 2,000 characters, are not judged.
+   Exchanges with images are (Jev sees their text; `recall` returns their images). An omission early in the session makes the next request rewrite the prompt cache
    from there, so at run end it happens only when it pays off over as many later requests as the session
    has had so far and saves at least 8,000 characters (`exchangeBreakEven`); otherwise the exchanges
    wait, and are judged again at later run ends until their total pays off. All three kinds are judged
    in parallel, at most `concurrency` (6) Jev requests at a time.
+8. **Old images** in tool results (screenshots, `read` of an image) are removed once
+   `imageKeepTurns` (3) assistant messages have followed them. Jev reads text only and is not asked: the
+   model has reacted to the image by then, and its reply stays. The result keeps its text behind a stub
+   (`[context-guard] Removed 1 image from this output (1280×960; ~1.6k tokens), 4 turns old. recall(…) shows it again.`),
+   and `recall` returns the images. Images you send in your own messages are never removed. Images of
+   an earlier run move the cache rewrite back, so at run end they go through the same break-even gate as
+   old exchanges.
 
 During long runs, **mid-run checkpoints** do the same for older items before the run ends (next
 section).
@@ -118,7 +129,9 @@ minus 16k tokens. So, while a run is going, the extension also checkpoints:
    question). The break-even rule
    (`midRunBreakEven`) skips a checkpoint unless the expected saving over the rest of the run covers that.
    Old exchanges come early in the context, so they move the rewrite back to the start; if the batch with
-   them does not pay off, the checkpoint runs on the tool outputs alone, and the exchanges wait for run end.
+   them does not pay off, the checkpoint runs on the tool outputs alone (with old images, then with only
+   this run's old images), and the exchanges wait for run end. Old images count towards the batch, so a
+   run that piles up screenshots checkpoints even without any text output to judge.
 4. **Jev gets a checkpoint question:** no final answer exists yet, so it sees the task, the agent's latest
    notes, the tool calls made since this output, and whether the output was superseded (the file was
    edited afterwards, or the same command ran again). It answers whether the agent will still need each
@@ -209,7 +222,7 @@ each Jev request sends the following to OpenRouter, which forwards it to TypeSaf
   size. Set `pruneExchanges` to `false` to send none of it.
 
 Never sent: tool outputs below `smallResultMinChars` (400 characters), results of excluded tools (`edit`,
-`write`), outputs with images, old exchanges with images or with entries another extension changed,
+`write`), images (never sent: they are removed by age), the text of outputs with images, old exchanges with entries another extension changed,
 exchanges below 2,000 characters, and the last `keepRecentExchanges` (2) exchanges before the current
 prompt. Large outputs are sent only when the run's large outputs add up to `minRunChars` (8,000); small
 outputs and old exchanges are sent at every run end and every mid-run checkpoint that has any.
@@ -223,16 +236,19 @@ sessions. See OpenRouter's data policy:
 | Text | Meaning |
 |---|---|
 | `🛡 0 saved` | On and ready; nothing is distilled on this branch yet |
+| `🛡 0 · Σ−79k` | A compaction dropped the earlier edits from context: nothing is kept out right now, about 79k tokens were saved on this branch in total |
 | `🛡 distilling…` | Jev is judging the outputs of the run that just finished, or of a mid-run checkpoint |
-| `🛡 −4.2k · 1` | ≈ tokens kept out of context · items: about 4.2k tokens are currently kept out of context, by 1 distilled or omitted tool output or old exchange |
+| `🛡 −4.2k · 1` | ≈ tokens kept out of context · items: about 4.2k tokens are currently kept out of context, by 1 distilled or omitted tool output, output without its images, or old exchange |
+| `🛡 −4.2k · 1 · Σ−83k` | The same, after a compaction: Σ is the total saved on this branch, including edits the compaction dropped |
 | `🛡 guard off` | Turned off with `/guard off` or `"enabled": false` |
 | `🛡 no openrouter key` | No credential for the classifier's provider (the provider name is filled in) |
 | `🛡 Jev model not found` | The configured `model` is not in Pi's classifier catalog |
 
 The token figure is Pi's usual estimate, characters ÷ 4. It counts what is kept out of the model's context
-**on the current branch right now**: original length minus replacement length, for every distilled output
-and omitted exchange that is still in the context. It goes down after `/tree` to a point before an edit, and after compaction
-removes distilled results. It is not a measured token count and not a cumulative total.
+**on the current branch right now**: original size minus replacement size, for every distilled output,
+removed image and omitted exchange that is still in the context (an image counts as about width × height ÷ 750
+tokens). It goes down after `/tree` to a point before an edit, and after compaction removes distilled
+results; then Σ shows the total of every pass on the branch so far. It is not a measured token count.
 
 ## `/guard` command
 
@@ -298,6 +314,7 @@ fall back to the default.
 | `exchangeOmitThreshold` | `0.2` | Omit an exchange only if P(still relevant) is below this (probe in docs/JEV.md) |
 | `exchangeBreakEven` | `true` | At run end, omit unrelated exchanges only when the cache rewrite they cause pays off; deferred ones are judged again at later run ends and omitted once their total pays off. `false` always omits them |
 | `exchangeMinSavingChars` | `8000` | A run end omits exchanges only if they save at least this many characters together (when they cost a cache rewrite) |
+| `imageKeepTurns` | `3` | Remove images from tool results once this many assistant messages have followed them (`recall` shows them again); images in user messages are kept; `0` turns this off |
 
 Example:
 
@@ -312,14 +329,16 @@ Example:
 - compaction and branch summaries, exchanges that did not finish (the last reply has tool calls), and
   messages Pi cannot edit (system messages, `!` shell executions), which stay in place inside an omitted
   exchange
-- tool results that contain images
+- images in your own messages; images in tool results younger than `imageKeepTurns` (3) turns
+- the text of tool results that contain images (only the images are removed, by age)
 - error results, if `distillErrors` is `false`
 - results of excluded tools (`edit`, `write` by default)
 - results shorter than `smallResultMinChars` (400), and large results of runs below `minRunChars`
 - aborted or failed runs
 - results that are already distilled, or that another extension already edited
 - single lines too long for one Jev request (kept as they are)
-- tool outputs of earlier runs one by one: earlier runs are only touched as whole exchanges
+- tool outputs of earlier runs one by one: earlier runs are only touched as whole exchanges (and their old
+  images)
 
 ## Limitations
 

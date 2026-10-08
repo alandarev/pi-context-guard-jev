@@ -10,7 +10,7 @@ import { after, before, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { MARKER } from "../../src/render.ts";
 import type { ClassifierAnswer, ClassifierRequest, ClassifierResponse } from "../../src/types.ts";
-import { assistant, lines, toolResult, user } from "./fixtures.ts";
+import { assistant, lines, screenshotResult, toolResult, user } from "./fixtures.ts";
 
 // Pi's getAgentDir() honours PI_CODING_AGENT_DIR; never touch the real ~/.pi/agent.
 const agentDir = mkdtempSync(join(tmpdir(), "context-guard-agent-"));
@@ -826,4 +826,117 @@ test("run-end break-even: on OpenAI Codex exchanges ride along when the pass edi
 	const keepSmall = sessionCtx(session, itemAnswers((k) => (k.startsWith("item_") ? 0.9 : 0.05)));
 	Object.assign(keepSmall.ctx, { model: codex });
 	assert.deepEqual(exchangeResults(await settle(session, keepSmall.ctx)), ["u1:kept:deferred"]);
+});
+
+// --- old images ----------------------------------------------------------------------------------
+
+/** A run with `turns` screenshot turns; `done` adds the final answer. */
+const screenshotRun = (turns: number, done: boolean, prefix = "s") => {
+	const out: ReturnType<typeof user>[] = [user("Check every page", `${prefix}u`)];
+	for (let t = 0; t < turns; t++) {
+		out.push(assistant(t === 1 ? "Page 0 looks fine." : "", [{ id: `${prefix}c${t}`, name: "screenshot", arguments: { page: t } }], `${prefix}a${t}`));
+		out.push(screenshotResult(`${prefix}c${t}`, "screenshot", `page ${t} captured`, `${prefix}r${t}`));
+	}
+	if (done) out.push(assistant("All pages look fine.", [], `${prefix}done`));
+	return out;
+};
+const editTargets = (result: unknown) => ((result as { entries: Json[] } | undefined)?.entries ?? []).filter((e) => e.type === "context_edit").map((e) => e.targetId);
+
+test("agent_before_settle: old images are removed without Jev (even when it is unavailable); recall shows them again", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	const session = fakeSession(screenshotRun(5, true) as never);
+	const { ctx, calls } = sessionCtx(session);
+	ctx.modelRegistry.findOfType = (() => undefined) as never;
+	await handler("session_start")({ type: "session_start" }, ctx);
+	const result = (await settle(session, ctx)) as { entries: Json[] };
+	assert.equal(calls.length, 0);
+	// sr0–sr2 are 3+ turns old; sr3 and sr4 stay.
+	assert.deepEqual(editTargets(result), ["sr0", "sr1", "sr2"]);
+	const record = result.entries.at(-1)!.data;
+	assert.equal(record.requests, 0);
+	assert.deepEqual(
+		record.results.map((r: Json) => [r.kind, r.entryId, r.outcome, r.reason, r.label]),
+		[
+			["image", "sr0", "removed", "5 turns old", "screenshot (1 image)"],
+			["image", "sr1", "removed", "4 turns old", "screenshot (1 image)"],
+			["image", "sr2", "removed", "3 turns old", "screenshot (1 image)"],
+		],
+	);
+	assert.equal(record.savedChars, record.results.reduce((n: number, r: Json) => n + r.beforeChars - r.afterChars, 0));
+	session.commit(result.entries);
+	assert.deepEqual(session.projection()[2].messages[0].content.map((b: Json) => b.type), ["text", "text"]);
+
+	const tool = extension.tools.get("recall")!.definition;
+	const recallCtx = { sessionManager: { getEntry: (id: string) => session.branch.find((e) => e.id === id), getBranch: () => session.branch } };
+	const recalled = (await tool.execute("call", { entryId: "sr0" }, undefined, undefined, recallCtx)) as { content: Json[] };
+	assert.deepEqual(
+		recalled.content.map((b) => b.type),
+		["text", "image"],
+	);
+	assert.equal(recalled.content[0].text, "page 0 captured");
+	const searched = (await tool.execute("call", { entryId: "sr0", pattern: "page" }, undefined, undefined, recallCtx)) as { content: Json[] };
+	assert.deepEqual(
+		searched.content.map((b) => b.type),
+		["text"],
+	);
+	assert.match(searched.content[0].text, /^1: page 0 captured\n\[1 image\(s\) in the original; recall without pattern\/offset to see them\]$/);
+	// Nothing new to remove at the next settle.
+	assert.equal(await settle(session, ctx), undefined);
+});
+
+test("turn_end: old images fill a checkpoint batch on their own, under the break-even rule", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	// 12 turns: 9 images (~72k chars) are old enough, but the rewrite does not pay off yet.
+	const short = fakeSession(screenshotRun(12, false) as never);
+	const first = sessionCtx(short);
+	await handler("session_start")({ type: "session_start" }, first.ctx);
+	assert.equal(await handler("turn_end")(turnEndOf(short), first.ctx), undefined);
+	// 30 turns: 27 old images pay off.
+	const long = fakeSession(screenshotRun(30, false) as never);
+	const { ctx, calls } = sessionCtx(long);
+	const result = (await handler("turn_end")(turnEndOf(long), ctx)) as { entries: Json[] };
+	assert.equal(calls.length, 0);
+	assert.equal(editTargets(result).length, 27);
+	assert.equal(result.entries.at(-1)!.data.phase, "mid-run");
+	// Images off: nothing.
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, imageKeepTurns: 0 }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.equal(await handler("turn_end")(turnEndOf(long), ctx), undefined);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+});
+
+test("agent_before_settle: images of an earlier run go through the break-even gate", async () => {
+	const earlier = [user("Look at the login page", "pu"), assistant("", [{ id: "pc", name: "screenshot", arguments: {} }], "pa"), screenshotResult("pc", "screenshot", "login captured", "pr"), assistant("The button is cut off.", [], "pb")];
+	const current = [user("Fix it", "cu"), assistant("", [{ id: "cc", name: "bash", arguments: { command: "make" } }], "ca"), toolResult("cc", "bash", "ok", "cr"), assistant("Fixed.", [], "cd")];
+	const session = fakeSession([...earlier, ...current] as never);
+	const { ctx } = sessionCtx(session);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	// ~8k chars saved over 4 requests against an ~8k-char rewrite: deferred.
+	assert.equal(await settle(session, ctx), undefined);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, exchangeBreakEven: false }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.deepEqual(editTargets(await settle(session, ctx)), ["pr"]);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+});
+
+test("recall of an omitted exchange attaches user images and names tool-result images", async () => {
+	const tool = extension.tools.get("recall")!.definition;
+	const shot = screenshotResult("c1", "screenshot", "captured", "r1");
+	const branch = [
+		{ id: "u1", type: "message", message: { role: "user", content: [{ type: "text", text: "like this" }, { type: "image", mimeType: "image/png", data: "QUJD" }] } },
+		{ id: "a1", type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "screenshot", arguments: {} }] } },
+		shot.sourceEntry,
+		{ id: "a2", type: "message", message: { role: "assistant", content: [{ type: "text", text: "matches" }] } },
+	];
+	const ctx = { sessionManager: { getEntry: (id: string) => branch.find((e) => e.id === id), getBranch: () => branch } };
+	const result = (await tool.execute("call", { entryId: "u1" }, undefined, undefined, ctx)) as { content: Json[] };
+	assert.deepEqual(
+		result.content.map((b) => b.type),
+		["text", "image"],
+	);
+	assert.equal(
+		result.content[0].text,
+		["## user", "like this", "[1 image(s), attached below]", "## assistant", "[tool call] screenshot {}", "## tool result (screenshot)", "captured", '[1 image(s): recall({"entryId":"r1"}) shows them]', "## assistant", "matches"].join("\n"),
+	);
 });

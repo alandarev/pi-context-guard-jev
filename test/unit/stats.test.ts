@@ -49,7 +49,20 @@ test("computeStats sums context-guard custom entries", () => {
 });
 
 const identity: Colorize = (_color, text) => text;
-const empty: GuardStats = { distilledResults: 0, omittedExchanges: 0, savedChars: 0, savedTokens: 0, runs: 0, checkpoints: 0, requests: 0, costUsd: 0 };
+const empty: GuardStats = {
+	distilledResults: 0,
+	imageResults: 0,
+	omittedExchanges: 0,
+	savedChars: 0,
+	savedTokens: 0,
+	lifetimeChars: 0,
+	lifetimeTokens: 0,
+	compacted: false,
+	runs: 0,
+	checkpoints: 0,
+	requests: 0,
+	costUsd: 0,
+};
 
 test("formatStatus for each state", () => {
 	assert.equal(formatStatus(empty, "off", identity), "🛡 guard off");
@@ -58,6 +71,36 @@ test("formatStatus for each state", () => {
 	assert.equal(formatStatus(empty, "problem", identity), "🛡 guard unavailable");
 	assert.equal(formatStatus(empty, "ready", identity), "🛡 0 saved");
 	assert.equal(formatStatus({ ...empty, savedTokens: 12_345, distilledResults: 3 }, "ready", identity), "🛡 −12.3k · 3");
+	// After a compaction dropped earlier edits: the lifetime total too.
+	assert.equal(formatStatus({ ...empty, lifetimeTokens: 79_000, compacted: true }, "ready", identity), "🛡 0 · Σ−79.0k");
+	assert.equal(formatStatus({ ...empty, savedTokens: 4_200, imageResults: 2, distilledResults: 1, lifetimeTokens: 83_200, compacted: true }, "ready", identity), "🛡 −4.2k · 3 · Σ−83.2k");
+	// Without a compaction, or when nothing was lost, no lifetime part.
+	assert.equal(formatStatus({ ...empty, savedTokens: 4_200, distilledResults: 1, lifetimeTokens: 4_300 }, "ready", identity), "🛡 −4.2k · 1");
+	assert.equal(formatStatus({ ...empty, savedTokens: 4_200, distilledResults: 1, lifetimeTokens: 4_200, compacted: true }, "ready", identity), "🛡 −4.2k · 1");
+});
+
+test("computeStats: lifetime savings from records, compacted only after a saving record", () => {
+	const record = (savedChars: number) => ({ type: "custom", customType: CUSTOM_TYPE, data: { v: 1, savedChars, requests: 1, costUsd: 0, results: [] } });
+	const before = computeStats([], [{ type: "compaction" }, record(40_000), record(0)]);
+	assert.equal(before.lifetimeChars, 40_000);
+	assert.equal(before.lifetimeTokens, 10_000);
+	assert.equal(before.compacted, false);
+	const after = computeStats([], [record(0), { type: "compaction" }, record(40_000), { type: "compaction" }]);
+	assert.equal(after.compacted, true);
+});
+
+test("computeStats: a tool result whose images were removed counts as an image result, saved by pixels", () => {
+	const png = Buffer.alloc(32);
+	Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png, 0);
+	png.writeUInt32BE(1500, 16);
+	png.writeUInt32BE(1000, 20);
+	const raw = { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "shot taken" }, { type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
+	const projected = { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: `${MARKER} Removed 1 image` }, { type: "text", text: "shot taken" }] };
+	const stats = computeStats([{ sourceEntry: { id: "r1", type: "message", message: raw }, messages: [projected] }], []);
+	assert.equal(stats.imageResults, 1);
+	assert.equal(stats.distilledResults, 0);
+	// 1500×1000/750 = 2000 tokens × 4 chars, minus the stub.
+	assert.equal(stats.savedChars, 2_000 * 4 - `${MARKER} Removed 1 image`.length);
 });
 
 test("formatStatus colours each part", () => {

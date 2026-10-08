@@ -4,15 +4,16 @@
  *
  * Blocks that are not plain text must not be counted by their serialized length:
  * - images are base64 (a 1280×960 JPEG is ~110k characters) but cost about w×h/750 tokens on Anthropic
- *   (measured on a real Opus session: 1280×960 → ~1.6k tokens), so they are counted by their pixels;
+ *   (measured on a real Opus session: 1280×960 → ~1.6k tokens), so they are counted by their pixels, at
+ *   4 characters per token (Pi's own chars/4 estimate, so the footer shows image savings as tokens);
  * - thinking blocks carry an encrypted signature that grows with the hidden reasoning; it is counted at
  *   half its length (measured: ~0.25 tokens per signature character vs ~0.4 per character of tool text).
  */
 import { Buffer } from "node:buffer";
 import type { Block } from "./types.ts";
 
-/** Text characters per token assumed when converting image tokens (tool output runs at ~2.5–3). */
-export const IMAGE_CHARS_PER_TOKEN = 3;
+/** Text characters per image token: Pi's chars/4 estimate (tool output itself runs at ~2.5–3). */
+export const IMAGE_CHARS_PER_TOKEN = 4;
 /** Anthropic's image token estimate: width × height / 750. */
 export const IMAGE_PIXELS_PER_TOKEN = 750;
 /** Tokens assumed for an image whose size cannot be read (about a 1.15-megapixel image). */
@@ -61,21 +62,33 @@ export function imageSize(bytes: Uint8Array): { width: number; height: number } 
 	return undefined;
 }
 
-const imageTokenCache = new WeakMap<object, number>();
+export interface ImageInfo {
+	width?: number;
+	height?: number;
+	/** Estimated input tokens. */
+	tokens: number;
+}
 
-/** Estimated input tokens of an image block (`{ type: "image", data: <base64> }`). */
-export function imageTokens(block: Block): number {
-	const cached = imageTokenCache.get(block);
-	if (cached !== undefined) return cached;
-	let tokens = DEFAULT_IMAGE_TOKENS;
+const imageInfoCache = new WeakMap<object, ImageInfo>();
+
+/** Size (when the header is readable) and estimated input tokens of an image block (`{ type: "image", data: <base64> }`). */
+export function imageInfo(block: Block): ImageInfo {
+	const cached = imageInfoCache.get(block);
+	if (cached) return cached;
+	let info: ImageInfo = { tokens: DEFAULT_IMAGE_TOKENS };
 	if (typeof block.data === "string") {
 		const head = block.data.slice(0, HEADER_BASE64_CHARS);
 		const size = imageSize(Buffer.from(head.slice(0, head.length - (head.length % 4)), "base64"));
-		if (size && size.width > 0 && size.height > 0) tokens = Math.min(MAX_IMAGE_TOKENS, Math.max(1, Math.ceil((size.width * size.height) / IMAGE_PIXELS_PER_TOKEN)));
+		if (size && size.width > 0 && size.height > 0) {
+			info = { ...size, tokens: Math.min(MAX_IMAGE_TOKENS, Math.max(1, Math.ceil((size.width * size.height) / IMAGE_PIXELS_PER_TOKEN))) };
+		}
 	}
-	imageTokenCache.set(block, tokens);
-	return tokens;
+	imageInfoCache.set(block, info);
+	return info;
 }
+
+/** Estimated input tokens of an image block. */
+export const imageTokens = (block: Block): number => imageInfo(block).tokens;
 
 /** Estimated size of one content block in text characters. */
 export function blockChars(block: Block): number {

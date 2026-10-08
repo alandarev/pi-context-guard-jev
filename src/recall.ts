@@ -1,6 +1,7 @@
 /**
- * Text returned by the `recall` tool: the original tool output, optionally filtered by a regex
- * or limited to a line window, truncated like Pi's `read` tool.
+ * What the `recall` tool returns: the original tool output (with its images), optionally filtered by a
+ * regex or limited to a line window, truncated like Pi's `read` tool; or an omitted exchange as a
+ * transcript (images in its user messages attached, tool-result images named by their entry id).
  */
 import vm from "node:vm";
 import { MARKER } from "./render.ts";
@@ -15,6 +16,9 @@ export const RECALL_MAX_PATTERN = 500;
 export const RECALL_MATCH_CHARS = 4_000;
 /** Wall-clock limit for filtering by `pattern` (ms); stops catastrophic backtracking. */
 export const RECALL_PATTERN_TIMEOUT_MS = 1_000;
+
+/** Most images one recall returns (an exchange's user messages can hold more; the transcript says so). */
+export const RECALL_MAX_IMAGES = 6;
 
 export interface RecallParams {
 	entryId: string;
@@ -31,11 +35,27 @@ type RecallBranchEntry = { id?: string; type?: string; message?: { role?: string
  * custom messages, steering messages) up to the next prompt.
  */
 export function originalOutput(entry: SourceEntryLike | undefined, entryId: string, branch: readonly RecallBranchEntry[] = [], omittedIds?: readonly string[]): string {
+	return originalContent(entry, entryId, branch, omittedIds).text;
+}
+
+const imagesOf = (content: unknown): Block[] => (Array.isArray(content) ? (content as Block[]).filter((b) => b?.type === "image") : []);
+
+/** `originalOutput` plus the images that go with it: a tool result's images, or those of an exchange's user messages. */
+export function originalContent(
+	entry: SourceEntryLike | undefined,
+	entryId: string,
+	branch: readonly RecallBranchEntry[] = [],
+	omittedIds?: readonly string[],
+): { text: string; images: Block[] } {
 	const message = entry?.type === "message" ? entry.message : undefined;
-	if (message?.role === "toolResult") return textOf(message);
+	if (message?.role === "toolResult") return { text: textOf(message), images: imagesOf(message.content) };
 	if (message?.role === "user") {
 		const start = branch.findIndex((e) => e.id === entryId);
-		if (start >= 0) return exchangeTranscript(branch, start, omittedIds);
+		if (start >= 0) {
+			const images: Block[] = [];
+			const text = exchangeTranscript(branch, start, omittedIds, images);
+			return { text, images };
+		}
 	}
 	throw new Error(`No tool result or omitted exchange with entry id ${entryId}. Use the id from a "${MARKER}" note.`);
 }
@@ -58,9 +78,10 @@ export function omittedIdsFor(branch: readonly (RecallBranchEntry & { data?: unk
 /**
  * Plain-text transcript of the exchange that starts at branch[start] (a user message): with
  * `omittedIds`, exactly the prompt and those entries (what the omission removed); otherwise everything up
- * to the next user message that is not a steering message.
+ * to the next user message that is not a steering message. Images: a tool result's are named by its entry
+ * id (recall it to see them); a user message's are appended to `images` (up to RECALL_MAX_IMAGES).
  */
-export function exchangeTranscript(branch: readonly RecallBranchEntry[], start: number, omittedIds?: readonly string[]): string {
+export function exchangeTranscript(branch: readonly RecallBranchEntry[], start: number, omittedIds?: readonly string[], images: Block[] = []): string {
 	const out: string[] = [];
 	const listed = omittedIds ? new Set(omittedIds) : undefined;
 	for (let i = start; i < branch.length; i++) {
@@ -75,15 +96,26 @@ export function exchangeTranscript(branch: readonly RecallBranchEntry[], start: 
 		if (e.type !== "message" || !e.message) continue;
 		const m = e.message;
 		const content = m.content as string | Block[];
-		if (m.role === "user") out.push("## user", textOf({ role: "user", content }));
-		else if (m.role === "assistant") {
+		const pictures = imagesOf(content);
+		if (m.role === "user") {
+			out.push("## user", textOf({ role: "user", content }));
+			if (pictures.length > 0) {
+				const room = Math.max(0, RECALL_MAX_IMAGES - images.length);
+				images.push(...pictures.slice(0, room));
+				const shown = Math.min(room, pictures.length);
+				out.push(shown === pictures.length ? `[${pictures.length} image(s), attached below]` : `[${pictures.length} image(s), ${shown} attached below]`);
+			}
+		} else if (m.role === "assistant") {
 			out.push("## assistant");
 			const text = textOf({ role: "assistant", content });
 			if (text.trim()) out.push(text);
 			if (Array.isArray(content)) {
 				for (const block of content) if (block.type === "toolCall") out.push(`[tool call] ${String(block.name)} ${JSON.stringify(block.arguments ?? {})}`);
 			}
-		} else if (m.role === "toolResult") out.push(`## tool result (${m.toolName ?? "tool"})`, textOf({ role: "toolResult", content }));
+		} else if (m.role === "toolResult") {
+			out.push(`## tool result (${m.toolName ?? "tool"})`, textOf({ role: "toolResult", content }));
+			if (pictures.length > 0) out.push(`[${pictures.length} image(s): recall({"entryId":"${e.id}"}) shows them]`);
+		}
 	}
 	return out.join("\n");
 }

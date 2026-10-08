@@ -321,14 +321,14 @@ const twoOld = (first: ReturnType<typeof user>[]) => [
 	user("Current task", "u9"),
 ];
 
-test("collectExchanges skips exchanges with images or with entries another extension edited", () => {
+test("collectExchanges: exchanges with images are eligible (recall returns them); foreign edits are skipped", () => {
 	const image = twoOld([
 		entry({ role: "user", content: [{ type: "text", text: "What is in this screenshot?" }, { type: "image", data: "x", mimeType: "image/png" }] }, "u1"),
 		assistant(`A stack trace.\n${pad}`, [], "a1"),
 	]);
 	assert.deepEqual(
 		collectExchanges(image, findRunStart(image), 0, new Set()).map((x) => x.entryId),
-		["u2"],
+		["u1", "u2"],
 	);
 	const imageResult = twoOld([
 		user("Show the chart", "u1"),
@@ -338,7 +338,15 @@ test("collectExchanges skips exchanges with images or with entries another exten
 	]);
 	assert.deepEqual(
 		collectExchanges(imageResult, findRunStart(imageResult), 0, new Set()).map((x) => x.entryId),
-		["u2"],
+		["u1", "u2"],
+	);
+	// Its images were removed by us (our marker): still ours, still eligible.
+	const stripped = imageResult.map((e) =>
+		e.sourceEntry.id === "r1" ? { ...e, messages: [{ role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: `${MARKER} Removed 1 image` }] }] } : e,
+	);
+	assert.deepEqual(
+		collectExchanges(stripped, findRunStart(stripped), 0, new Set()).map((x) => x.entryId),
+		["u1", "u2"],
 	);
 	// The prompt was replaced by another extension (not our marker): skipped.
 	const foreign = twoOld([user("Original prompt", "u1"), assistant(`Answer.\n${pad}`, [], "a1")]).map((e) =>

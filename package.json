@@ -1,6 +1,6 @@
 {
   "name": "pi-context-guard-jev",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Keep your Pi context lean: the Jev classifier trims big tool outputs to the lines your work still needs, drops stale small outputs and unrelated old exchanges, at run end and during long autonomous runs. Verbatim, recallable, cache-aware, savings in the status bar.",
   "type": "module",
   "license": "MIT",
