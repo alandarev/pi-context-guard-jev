@@ -131,7 +131,7 @@ test("collectExchanges: earlier completed exchanges, without the recent ones and
 	);
 });
 
-test("collectExchanges: an exchange that did not complete (ends with a tool call) is not eligible", () => {
+test("collectExchanges: a steering message belongs to the exchange it was sent in", () => {
 	const entries = [
 		user("Fix it", "u1"),
 		assistant("", [{ id: "c1", name: "bash", arguments: { command: "npm test" } }], "a1"),
@@ -142,9 +142,26 @@ test("collectExchanges: an exchange that did not complete (ends with a tool call
 		assistant(`ok\n${pad}`, [], "a3"),
 		user("now", "u4"),
 	];
+	const exchanges = collectExchanges(entries, findRunStart(entries), 0, new Set());
+	assert.deepEqual(
+		exchanges.map((x) => x.entryId),
+		["u1", "u3"],
+	);
+	assert.deepEqual(exchanges[0].omitIds, ["a1", "r1", "u2", "a2"]);
+});
+
+test("collectExchanges: a user message after a tool call (no result yet) is steering too", () => {
+	const entries = [
+		user("Fix it", "u1"),
+		assistant(`working\n${pad}`, [{ id: "c1", name: "bash", arguments: { command: "npm test" } }], "a1"),
+		user("next", "u3"),
+		assistant(`ok\n${pad}`, [], "a3"),
+		user("now", "u4"),
+	];
+	// u3 follows an assistant message with tool calls: a steering message, so u1's exchange runs to u4.
 	assert.deepEqual(
 		collectExchanges(entries, findRunStart(entries), 0, new Set()).map((x) => x.entryId),
-		["u2", "u3"],
+		["u1"],
 	);
 });
 

@@ -10,8 +10,9 @@
  * entries), never kept in memory: a boundary's drafts can be replaced by a later handler or rejected
  * as a whole, and /tree or compaction change the branch.
  */
-import { toolLabel } from "./render.ts";
-import { type Candidate, type CollectOptions, candidateOf, collectHistory, findRunStart, indexSpan, questionAt, type RunHistory, type ToolCallInfo } from "./run.ts";
+import { RECALL_TOOL, toolLabel } from "./render.ts";
+import { type Candidate, type CollectOptions, candidateOf, collectHistory, findRunStart, isBranchSteering, indexSpan, lastUserIndex, type RunHistory, runQuestion, type ToolCallInfo } from "./run.ts";
+import { contentChars } from "./size.ts";
 import type { ProjectedEntryLike } from "./types.ts";
 
 export interface CheckpointOptions extends CollectOptions {
@@ -116,7 +117,8 @@ export function collectCheckpoint(entries: readonly ProjectedEntryLike[], option
 	for (const entry of span) {
 		const candidate = candidateOf(entry, toolCalls, options);
 		if (!candidate || candidate.turn === undefined || judged.has(candidate.entryId)) continue;
-		if (candidate.turn > youngest) continue;
+		// A recall output was asked for in this run: judging it again mid-run made models recall the recall.
+		if (candidate.turn > youngest || candidate.toolName === RECALL_TOOL) continue;
 		const turn = candidate.turn;
 		const superseded = supersededBy({ toolName: candidate.toolName, args: candidate.args, turn }, calls);
 		candidates.push({ ...candidate, turn, laterCalls: laterCallsFor(turn, calls), ...(superseded ? { superseded } : {}) });
@@ -124,7 +126,7 @@ export function collectCheckpoint(entries: readonly ProjectedEntryLike[], option
 
 	const latest = assistantTexts.at(-1)?.text ?? "";
 	return {
-		question: questionAt(entries, start),
+		question: runQuestion(entries, start),
 		history: collectHistory(entries.slice(0, start), options.historyExchanges),
 		latest,
 		notes: assistantTexts
@@ -156,14 +158,16 @@ export function paysOff(pendingChars: number, turnsSoFar: number, rewriteChars: 
 	return pendingChars * Math.max(1, turnsSoFar) >= factor * rewriteChars;
 }
 
-/** Characters of model-visible text in the projected context (an estimate of its size). */
+/**
+ * Size of the projected context in text characters (an estimate, see size.ts: images count by their
+ * pixels, not their base64 length).
+ */
 export function contextChars(entries: readonly ProjectedEntryLike[]): number {
 	let n = 0;
 	for (const entry of entries) {
 		for (const message of entry.messages) {
 			if (typeof message.summary === "string") n += message.summary.length;
-			if (typeof message.content === "string") n += message.content.length;
-			else for (const block of message.content ?? []) n += typeof block.text === "string" ? block.text.length : JSON.stringify(block).length;
+			n += contentChars(message.content);
 		}
 	}
 	return n;
@@ -187,7 +191,7 @@ export type BranchEntry = {
 	customType?: string;
 	data?: unknown;
 	targetId?: string;
-	message?: { role?: string; stopReason?: string; toolCallId?: string };
+	message?: { role?: string; stopReason?: string; toolCallId?: string; content?: unknown };
 };
 
 const isAnswered = (entry: BranchEntry): boolean =>
@@ -337,7 +341,8 @@ export function refreshOnReadThrough(
 	baseline: number,
 ): string[] {
 	if (!(cacheRead > 0) || !(baseline > 0) || cacheRead <= baseline) return [];
-	const start = findRunStart(projection);
+	// The baseline is measured from the last user message (prompt or steering message, see runBaseline).
+	const start = lastUserIndex(projection);
 	if (start < 0) return [];
 	const position = positionsOf(branch);
 	const refreshed: string[] = [];
@@ -391,10 +396,12 @@ export function anthropicRewriteChars(
 	const read = Number.isFinite(first) ? trustedReadPoint(branch, log, model, now, first) : undefined;
 	const readIndex = read ? projection.findIndex((entry) => entry.sourceEntry.id === read.id) : -1;
 	if (readIndex >= 0) return contextChars(projection.slice(readIndex + 1));
-	// The question pin can be read only if every edit comes after it (an omitted old exchange comes before).
-	const runStart = findRunStart(projection);
+	// The question pin (on the last user message with text: after steering, the steering message) can be
+	// read only if every edit comes after it (an omitted old exchange, or an output from before a steering
+	// message, comes before).
+	const pin = lastUserIndex(projection);
 	const earliest = projection.findIndex((entry) => candidateIds.has(entry.sourceEntry.id));
-	const from = earliest >= 0 && earliest <= runStart ? 0 : runStart + 1;
+	const from = earliest >= 0 && earliest <= pin ? 0 : pin + 1;
 	return contextChars(projection.slice(Math.max(0, from)));
 }
 
@@ -416,12 +423,28 @@ export function memoFromBranch(branch: readonly BranchEntry[], customType: strin
 }
 
 /**
- * Old exchanges judged during the current run (records of any phase after the last user message on the
- * branch). An exchange is judged again in a later run, against that run's work.
+ * Index of the branch entry with the user message that started the current run (steering messages
+ * skipped, as in run.ts → findRunStart), or -1.
+ */
+export function branchRunStart(branch: readonly BranchEntry[]): number {
+	const isUser = (e: BranchEntry) => e.type === "message" && e.message?.role === "user";
+	let start = branch.length - 1;
+	while (start >= 0 && !isUser(branch[start])) start--;
+	while (start > 0 && isBranchSteering(branch, start)) {
+		let p = start - 1;
+		while (p >= 0 && !isUser(branch[p])) p--;
+		if (p < 0) break;
+		start = p;
+	}
+	return start;
+}
+
+/**
+ * Old exchanges judged during the current run (records of any phase after the user message that started
+ * the run on the branch). An exchange is judged again in a later run, against that run's work.
  */
 export function exchangeMemo(branch: readonly BranchEntry[], customType: string): Set<string> {
-	let start = branch.length - 1;
-	while (start >= 0 && !(branch[start].type === "message" && branch[start].message?.role === "user")) start--;
+	const start = branchRunStart(branch);
 	const judged = new Set<string>();
 	for (const entry of branch.slice(start + 1)) {
 		if (entry.type !== "custom" || entry.customType !== customType) continue;

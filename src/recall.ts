@@ -4,6 +4,7 @@
  */
 import vm from "node:vm";
 import { MARKER } from "./render.ts";
+import { isBranchSteering } from "./run.ts";
 import { type Block, type SourceEntryLike, textOf } from "./types.ts";
 
 export const RECALL_MAX_LINES = 2_000;
@@ -27,7 +28,7 @@ type RecallBranchEntry = { id?: string; type?: string; message?: { role?: string
 /**
  * The original text behind a context-guard stub: a tool result's output, or, for the user prompt of an
  * omitted exchange, the whole exchange from the branch (prompt, assistant texts, tool calls and results,
- * custom messages) up to the next user message.
+ * custom messages, steering messages) up to the next prompt.
  */
 export function originalOutput(entry: SourceEntryLike | undefined, entryId: string, branch: readonly RecallBranchEntry[] = [], omittedIds?: readonly string[]): string {
 	const message = entry?.type === "message" ? entry.message : undefined;
@@ -57,7 +58,7 @@ export function omittedIdsFor(branch: readonly (RecallBranchEntry & { data?: unk
 /**
  * Plain-text transcript of the exchange that starts at branch[start] (a user message): with
  * `omittedIds`, exactly the prompt and those entries (what the omission removed); otherwise everything up
- * to the next user message.
+ * to the next user message that is not a steering message.
  */
 export function exchangeTranscript(branch: readonly RecallBranchEntry[], start: number, omittedIds?: readonly string[]): string {
 	const out: string[] = [];
@@ -66,7 +67,7 @@ export function exchangeTranscript(branch: readonly RecallBranchEntry[], start: 
 		const e = branch[i];
 		if (listed) {
 			if (i > start && !listed.has(e.id ?? "")) continue;
-		} else if (i > start && e.type === "message" && e.message?.role === "user") break;
+		} else if (i > start && e.type === "message" && e.message?.role === "user" && !isBranchSteering(branch, i)) break;
 		if (e.type === "custom_message") {
 			out.push(`## custom message (${e.customType ?? "custom"})`, textOf({ role: "custom", content: (e.content ?? "") as string }));
 			continue;

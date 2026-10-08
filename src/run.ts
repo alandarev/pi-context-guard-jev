@@ -61,23 +61,84 @@ export const HISTORY_FIRST_REQUEST_LIMIT = 1_000;
 /** Question text used when the prompt that started the run has no text (e.g. only an image). */
 export const NO_TEXT_QUESTION = "[the user sent only an image]";
 
+const hasUser = (entry: ProjectedEntryLike): boolean => entry.messages.some((m) => m.role === "user");
+
+/** An assistant message that handed over to tools (not stopped by an abort or error). */
+export const endsInToolCall = (message: { stopReason?: unknown; content?: unknown }): boolean =>
+	message.stopReason !== "aborted" && message.stopReason !== "error" && Array.isArray(message.content) && message.content.some((b) => b?.type === "toolCall");
+
+/** Index of the entry holding the last user message (prompt or steering message), or -1. */
+export function lastUserIndex(entries: readonly ProjectedEntryLike[], before = entries.length): number {
+	let index = Math.min(before, entries.length) - 1;
+	while (index >= 0 && !hasUser(entries[index])) index--;
+	return index;
+}
+
 /**
- * The run starts after the last user message, with or without text. Steering messages sent
- * during a run are user messages too, so they start a new span; tool results before them are
- * left for later (they stay unpruned, which is the safe direction).
+ * A user message sent while the agent was still working: the message before it (custom notices and
+ * omitted entries aside) is a tool result, or an assistant message with tool calls that did not stop on an
+ * abort or error. It continues the run. (A prompt typed after aborting a running tool looks the same and
+ * is treated as steering too: it usually redirects the same work.)
  */
-/** Index of the entry holding the user message that starts the current run, or -1. */
+export function isSteering(entries: readonly ProjectedEntryLike[], index: number): boolean {
+	for (let i = index - 1; i >= 0; i--) {
+		const message = entries[i].messages.at(-1);
+		if (!message || message.role === "custom") continue;
+		if (message.role === "toolResult") return true;
+		if (message.role === "assistant") return endsInToolCall(message);
+		return false;
+	}
+	return false;
+}
+
+type BranchMessageEntry = { type?: string; message?: { role?: string; stopReason?: unknown; content?: unknown } };
+
+/** `isSteering` on raw branch entries: is the user message at branch[index] a steering message? */
+export function isBranchSteering(branch: readonly BranchMessageEntry[], index: number): boolean {
+	for (let i = index - 1; i >= 0; i--) {
+		const e = branch[i];
+		if (e.type !== "message" || !e.message) continue;
+		if (e.message.role === "toolResult") return true;
+		if (e.message.role === "assistant") return endsInToolCall(e.message);
+		return false;
+	}
+	return false;
+}
+
+/**
+ * Index of the entry holding the user message that starts the current run, or -1. Steering messages
+ * (sent during the run) do not start a run: the span goes back to the prompt the agent started from, so
+ * tool results from before a steering message are still judged (against the prompt and every steering
+ * message, see `runQuestion`).
+ */
 export function findRunStart(entries: readonly ProjectedEntryLike[]): number {
-	let start = entries.length - 1;
-	while (start >= 0 && !entries[start].messages.some((m) => m.role === "user")) start--;
+	let start = lastUserIndex(entries);
+	while (start > 0 && isSteering(entries, start)) {
+		const previous = lastUserIndex(entries, start);
+		if (previous < 0) break;
+		start = previous;
+	}
 	return start;
 }
 
-/** The run's question: the text of the user message at `start`. */
+/** The text of the user message at `start`. */
 export function questionAt(entries: readonly ProjectedEntryLike[], start: number): string {
 	const questionMessage = entries[start].messages.findLast((m) => m.role === "user");
 	const questionText = questionMessage ? textOf(questionMessage).trim() : "";
 	return questionText ? textOf(questionMessage as MessageLike) : NO_TEXT_QUESTION;
+}
+
+export const STEERING_PREFIX = "[The user added during the run]";
+
+/** The run's question: the prompt at `start`, then every steering message of the run in order. */
+export function runQuestion(entries: readonly ProjectedEntryLike[], start: number): string {
+	const parts = [questionAt(entries, start)];
+	for (let i = start + 1; i < entries.length; i++) {
+		if (!hasUser(entries[i])) continue;
+		const text = textOf(entries[i].messages.findLast((m) => m.role === "user") as MessageLike).trim();
+		parts.push(`${STEERING_PREFIX} ${text || NO_TEXT_QUESTION}`);
+	}
+	return parts.join("\n\n");
 }
 
 export interface ToolCallInfo {
@@ -140,16 +201,15 @@ export function candidateOf(
 }
 
 /**
- * The run starts after the last user message, with or without text. Steering messages sent
- * during a run are user messages too, so they start a new span; tool results before them are
- * left for later (they stay unpruned, which is the safe direction).
+ * The run starts after the user message that started the agent (see `findRunStart`: steering messages
+ * sent during the run belong to it).
  *
  * `skip`: entry ids not to collect.
  */
 export function collectRun(entries: readonly ProjectedEntryLike[], options: CollectOptions, skip?: ReadonlySet<string>): RunInfo | undefined {
 	const start = findRunStart(entries);
 	if (start < 0) return undefined;
-	const question = questionAt(entries, start);
+	const question = runQuestion(entries, start);
 	const span = entries.slice(start + 1);
 	const { toolCalls, assistantTexts } = indexSpan(span);
 	const answer = assistantTexts.at(-1)?.text ?? "";

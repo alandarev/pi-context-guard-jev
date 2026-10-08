@@ -8,6 +8,7 @@
  */
 import { formatChars, MARKER } from "./render.ts";
 import { EXCHANGE_STUB_PREFIX } from "./items.ts";
+import { isBranchSteering } from "./run.ts";
 import { type MessageLike, type ProjectedEntryLike, textOf } from "./types.ts";
 
 export const CUSTOM_TYPE = "context-guard";
@@ -75,7 +76,7 @@ export function computeStats(projection: readonly ProjectedEntryLike[], branch: 
 			let before = textOf(raw).length;
 			for (let i = start + 1; start >= 0 && i < branch.length; i++) {
 				const e = branch[i];
-				if (e.type === "message" && e.message?.role === "user") break;
+				if (e.type === "message" && e.message?.role === "user" && !isBranchSteering(branch, i)) break;
 				if (e.message && e.id && (visibleMessages.get(e.id) ?? 0) === 0) before += textOf(e.message).length;
 			}
 			stats.omittedExchanges++;

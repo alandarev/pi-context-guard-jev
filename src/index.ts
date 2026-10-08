@@ -36,7 +36,7 @@ import {
 import { buildCheckpointRequest } from "./decide.ts";
 import { type GuardConfig, loadConfig, parseModelRef, saveConfigPatch } from "./config.ts";
 import { omittedIdsFor, originalOutput, recallText } from "./recall.ts";
-import { formatChars, MARKER } from "./render.ts";
+import { formatChars, MARKER, RECALL_TOOL } from "./render.ts";
 import { collectExchanges, collectSmall, type ExchangeItem, type SmallItem, type WorkContext } from "./items.ts";
 import { deferExchanges, exchangeOmissions, type ProcessOptions, type ProcessOutcome, processItems } from "./process.ts";
 import { collectRun, findRunStart, type RunInfo } from "./run.ts";
@@ -353,7 +353,7 @@ export default function contextGuard(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "recall",
+		name: RECALL_TOOL,
 		label: "Recall",
 		description:
 			`Return the original of something context-guard distilled or omitted (its text starts with "${MARKER}"): a tool output, ` +

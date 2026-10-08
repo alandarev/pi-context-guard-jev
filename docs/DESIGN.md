@@ -62,10 +62,14 @@ Hooks used:
 
 ### 1. Run span
 
-`collectRun` walks back through `event.context.contextEntries` (Pi's projected entries) to the last entry
-that has a user message, with or without text. Its text is the **question**; a prompt with only an image
-gets the placeholder `[the user sent only an image]`, so an older question is never reused. Everything
-after it is the run. Assistant
+`collectRun` walks back through `event.context.contextEntries` (Pi's projected entries) to the user
+message that started the run (`findRunStart`), with or without text. **Steering messages** (user messages
+sent while the agent was working: the message before them, custom notices aside, is a tool result or an
+assistant message with tool calls) do not start a run; the walk goes on to the prompt before them. The
+**question** is that prompt's text followed by every steering message of the run, each prefixed with
+`[The user added during the run]`; a message with only an image gets the placeholder
+`[the user sent only an image]`, so an older question is never reused. Everything after the prompt is the
+run. Assistant
 text in the run gives the **answer** (the last text) and the **notes** (all earlier text). Tool calls are
 indexed by id so each result can be matched with its tool name and arguments.
 
@@ -75,7 +79,7 @@ default 3; `0` turns all of it off):
 - `summary`: the text (`summary` field) of the latest `compactionSummary` or `branchSummary` message, at
   most 2,000 characters.
 - `exchanges`: the last N earlier exchanges, oldest first. Every user message starts one (steering messages
-  included; an image-only prompt shows as `[the user sent only an image]`). Each holds the prompt (at most
+  of earlier runs included; an image-only prompt shows as `[the user sent only an image]`). Each holds the prompt (at most
   800 characters) and the **last** assistant text before the next user message (at most 1,200). Tool calls
   and tool results are left out.
 - `firstRequest`: the first user prompt in the projection (at most 1,000 characters), only when it is not
@@ -218,10 +222,9 @@ run end every small output without the marker is judged, including those kept at
 **Old exchanges** (`collectExchanges`). An exchange is a user prompt and every entry up to the next one:
 assistant messages, tool calls and results, custom messages such as subagent notices. Eligible are
 exchanges before the current run's user message, without the last `keepRecentExchanges` (2) before it,
-that completed (their last assistant message has no tool calls, so a span cut by a steering message is
-never one), that are not already omitted (their prompt shows the stub), that were not judged during the
-current run (`exchangeMemo`: exchange results in records after the last user message, except deferred
-ones), and that can be recovered and are worth it: no message with an image, no entry whose model-visible
+that completed (their last assistant message has no tool calls; a steering message belongs to the exchange
+it was sent in), that are not already omitted (their prompt shows the stub), that were not judged during the
+current run (`exchangeMemo`: exchange results in records after the run's prompt, except deferred ones), and that can be recovered and are worth it: no message with an image, no entry whose model-visible
 content differs from the raw entry for any reason other than our own marker (another extension's edit,
 or an omission by someone else, which Pi keeps in the projection as an entry with no messages), at least
 2,000 characters of editable content, and a stub shorter than that content. A kept exchange is
@@ -447,8 +450,16 @@ from a `[context-guard]` note.
 - **Never replace an assistant message's content.** A replacement turns the content into one text block,
   which drops thinking, signatures and tool calls. Assistant messages are only omitted, as part of a whole
   exchange.
-- **Steering messages move the span.** A user message sent during a run starts a new span. Tool results
-  from before it are never candidates, now or later. That is the safe direction.
+- **Steering messages continue the run.** Until 0.2.0 a user message sent during a run started a new span,
+  and tool results from before it were never candidates again. In real sessions that left 0.1–0.4M
+  characters per steered run in context for good (they also blocked omitting the exchange, which contains
+  images). Now the span goes back to the prompt and the steering messages join the question. The
+  Anthropic question pin sits on the last user message with text (the steering message), so an edit before
+  it has no readable pin: `anthropicRewriteChars` counts the whole context unless a trusted read point
+  applies.
+- **Recall outputs are not judged mid-run.** The model just asked for them. Judging them at the next
+  checkpoint made models recall the same entry again (seen in real sessions). At run end they are judged
+  like other outputs.
 - **`keepCitedFiles` is off by default.** Answers also name files to rule them out. In a live run, Claude's
   answer said `test/fixtures/entities.json` was *not* a usage, and the option kept 40 lines of noise from
   that file. See [JEV.md](JEV.md).

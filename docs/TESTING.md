@@ -15,13 +15,14 @@ These need Node ≥ 22.18, which runs the `.ts` files directly. There is no netw
 |---|---|
 | `checkpoint.test.ts` | Mid-run eligibility and age, the memo and candidate rules, later calls, notes, superseded detection (edits, re-reads, reruns), cache anchors (read point only from logged entries of the same model within the TTL, invalidated by later edits and compaction, parallel-call batches never split, early return without pending edits), refresh on read-through (same model, cacheRead clearly past the entry, unchanged prefix; trusted after 5 minutes once refreshed), the run baseline, the Anthropic rewrite estimate (from the trusted read point, else from the question), pending edits, the memo from records, the break-even rule, context size with summaries |
 | `items.test.ts` | Small outputs (size window, candidate rules, age, memo, stub length, superseded), exchange spans (custom messages, completed exchanges only, the current run and the recent exchanges never touched, already omitted, memo; images, foreign edits and foreign omissions skipped, our own markers allowed; system, `!` and custom messages; a compaction that cut an exchange; minimum size), stubs and edits, the small and exchange requests in both phases, batching, the shared limiter, `judgeItems` (parallel limit, failures keep, time budget), `processItems` (stubs, omissions, records with kinds, one `concurrency` across all kinds) |
-| `run.test.ts` | Run span (including image-only prompts), question/answer/notes, candidate rules (errors, images, excluded tools, short, already-distilled and other-extension-edited results), steering messages; history (last N exchanges, first request, compaction/branch summaries, image-only and steering prompts, clipping, `historyExchanges` 0) |
+| `run.test.ts` | Run span (including image-only prompts), question/answer/notes, candidate rules (errors, images, excluded tools, short, already-distilled and other-extension-edited results), steering messages (continue the run, join the question); history (last N exchanges, first request, compaction/branch summaries, image-only and steering prompts, clipping, `historyExchanges` 0) |
 | `chunk.test.ts` | grep detection, grouping by file, context lines and `--`, `-digits-` file names, split/merge rules, plain-text windows, segment limits |
 | `decide.test.ts` | Checkpoint request shape and wording; run-end request shape, with and without `earlier_conversation` (state order, omitted parts, history wording vs. the unchanged single-run wording); the decision order (error, missing answers, `keep_whole`, strong/weak `whole`, chunks, `none`); `citedFiles` |
 | `distill.test.ts` | Skips, edits, `removed`, `not-worth`, failures, time budget (including a classifier that never answers and late answers), parent abort, concurrency limit, multi-segment outputs, oversize segments never sent, `keepCitedFiles`, usage sums |
 | `render.test.ts` | Labels, verbatim chunks with omission lines, `read` offsets, file lists, full removal |
 | `cache-pin.test.ts` | Question pin: API-key and OAuth payloads, trailing system messages, TTL selection and `ttl-conflict`, string content, tool-result-only messages, over-budget restore. Anchors: question > read > write priority, read anchor inside a batch of tool_result blocks, breakpoint budget (identity and tools breakpoints dropped, then write, then read; the question survives a foreign breakpoint), not found / last message / already marked, normalized tool ids, TTL order, `markedToolResults` |
 | `stats.test.ts` | Savings from the projection, run records (checkpoints counted), status texts and colours, cost format |
+| `size.test.ts` | Image sizes from PNG/JPEG/GIF/WebP headers, image tokens by pixels (not base64 length), thinking and tool-call sizes, `contextChars` with screenshots |
 | `recall.test.ts` | Original output, pattern (length cap, 4,000-char match window, catastrophic-regex timeout), offset/limit, line and byte caps, oversized lines |
 | `config.test.ts` | Defaults, validation and ranges (incl. `historyExchanges` 0–10 integer and the `midRun*` settings), `provider/id` parsing, load/save round trip |
 | `extension.test.ts` | The real entry point (see below) |
@@ -148,6 +149,12 @@ answers that also list clients to say they do not qualify). Results are in the R
 test/e2e/omit-probe.ts` omits the session's first exchange after turn 2 the way the guard does, so turn 3
 sends a stub user message right before the next user message, without the omitted assistant and
 tool-result messages. Both GPT-6 Luna and Claude Sonnet 5.5 (`pi-claude-auth`) accepted it and answered.
+
+**Session replay.** `node test/e2e/replay-session.ts <session.jsonl> [--from N] [--all]` rebuilds Pi's
+projection at every turn of a real session file and prints what the mid-run gates decide (run start, eligible
+large and small outputs, old exchanges, batch size, break-even) and the run-end candidates. No model calls,
+nothing leaves the machine. Without the live cache log it uses the question pin, so its break-even is the
+conservative case.
 
 **Whole-item probe.** `node test/e2e/probe-items.mjs [--reps 2] [--sessions <topics no-guard run dir>]…`
 sends the hand-written exchanges and small outputs in `test/e2e/probe-data/` (and the `topics` exchanges)

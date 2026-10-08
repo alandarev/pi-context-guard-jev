@@ -8,6 +8,8 @@ import type { Candidate } from "./run.ts";
 
 /** Every replacement starts with this; it also marks results as already distilled. */
 export const MARKER = "[context-guard]";
+/** Name of our recall tool. Its outputs are never judged mid-run: the model just asked for them. */
+export const RECALL_TOOL = "recall";
 
 export const formatChars = (chars: number): string =>
 	chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)}M` : chars >= 1_000 ? `${(chars / 1_000).toFixed(1)}k` : String(chars);

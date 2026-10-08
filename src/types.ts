@@ -16,6 +16,8 @@ export interface MessageLike {
 	toolName?: string;
 	toolCallId?: string;
 	isError?: boolean;
+	/** Assistant messages: why the model stopped ("toolUse", "stop", "aborted", "error", …). */
+	stopReason?: string;
 }
 
 export interface SourceEntryLike {

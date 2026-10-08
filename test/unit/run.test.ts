@@ -3,12 +3,16 @@ import { test } from "node:test";
 import { MARKER } from "../../src/render.ts";
 import {
 	collectRun,
+	findRunStart,
 	HISTORY_ASSISTANT_LIMIT,
 	HISTORY_FIRST_REQUEST_LIMIT,
 	HISTORY_SUMMARY_LIMIT,
 	HISTORY_USER_LIMIT,
 	hasHistory,
+	isSteering,
+	lastUserIndex,
 	NO_TEXT_QUESTION,
+	STEERING_PREFIX,
 } from "../../src/run.ts";
 import { assistant, entry, lines, toolResult, user } from "./fixtures.ts";
 
@@ -25,6 +29,7 @@ test("an image-only prompt is the run boundary; no older question is used", () =
 		user("old text question"),
 		assistant("old answer", [{ id: "c0", name: "bash", arguments: {} }]),
 		toolResult("c0", "bash", big, "old"),
+		assistant("old done"),
 		entry({ role: "user", content: [{ type: "image", data: "x", mimeType: "image/png" }] }, "img"),
 		assistant("", [{ id: "c1", name: "bash", arguments: {} }]),
 		toolResult("c1", "bash", big, "new"),
@@ -154,25 +159,46 @@ test("collectRun falls back to the tool call name when the result has no toolNam
 	assert.equal(run.answer, "");
 });
 
-test("a steering user message mid-run starts a new span", () => {
+test("a steering user message mid-run continues the run: earlier results stay candidates", () => {
 	const entries = [
+		user("old question"),
+		assistant("old answer"),
 		user("first question"),
 		assistant("searching", [{ id: "c1", name: "bash", arguments: {} }]),
 		toolResult("c1", "bash", big, "before"),
 		user("actually, look at bar"),
 		assistant("ok", [{ id: "c2", name: "bash", arguments: {} }]),
 		toolResult("c2", "bash", big, "after"),
+		{ sourceEntry: { id: "notice", type: "custom_message" }, messages: [{ role: "custom", content: "subagent done" }] },
+		user("and baz"),
 		assistant("bar is in b.ts"),
 	];
+	assert.equal(findRunStart(entries), 2);
+	assert.equal(lastUserIndex(entries), 9);
+	assert.equal(isSteering(entries, 5), true);
+	assert.equal(isSteering(entries, 9), true, "a custom notice in between does not end the run");
+	assert.equal(isSteering(entries, 2), false);
 	const run = collectRun(entries, options);
 	assert.ok(run);
-	assert.equal(run.question, "actually, look at bar");
+	assert.equal(run.question, `first question\n\n${STEERING_PREFIX} actually, look at bar\n\n${STEERING_PREFIX} and baz`);
 	assert.equal(run.answer, "bar is in b.ts");
-	assert.equal(run.notes, "ok");
+	assert.equal(run.notes, "searching\n\nok");
 	assert.deepEqual(
 		run.candidates.map((c) => c.entryId),
-		["after"],
+		["before", "after"],
 	);
+	assert.deepEqual(
+		run.history?.exchanges.map((x) => x.user),
+		["old question"],
+	);
+	// After an aborted or failed tool-call message, the next user message is a new prompt.
+	const aborted = [
+		user("first question"),
+		{ ...assistant("", [{ id: "c1", name: "bash", arguments: {} }]), messages: [{ role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }], stopReason: "aborted" }] },
+		user("do something else"),
+	];
+	assert.equal(isSteering(aborted, 2), false);
+	assert.equal(findRunStart(aborted), 2);
 });
 
 test("collectRun ignores entries projected to several messages", () => {
@@ -215,6 +241,8 @@ test("history: last N exchanges, oldest first, tool traffic excluded", () => {
 		user("fourth"),
 		assistant("", [{ id: "c2", name: "bash", arguments: {} }]),
 		toolResult("c2", "bash", big),
+		// The run ended without text (e.g. an error stop): the next prompt starts a new run.
+		assistant(""),
 		...currentRun,
 	];
 	const run = collectRun(entries, options);

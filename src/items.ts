@@ -4,9 +4,10 @@
  * output becomes a one-line stub; an omitted exchange keeps a stub on its user prompt and omits every
  * other entry (`replacement: null`).
  */
-import { MARKER, formatChars, toolLabel } from "./render.ts";
+import { MARKER, RECALL_TOOL, formatChars, toolLabel } from "./render.ts";
 import { supersededBy } from "./checkpoint.ts";
-import { type Candidate, type CollectOptions, candidateOf, indexSpan, type RunHistory } from "./run.ts";
+import { contentChars } from "./size.ts";
+import { type Candidate, type CollectOptions, candidateOf, indexSpan, isSteering, type RunHistory } from "./run.ts";
 import {
 	type ClassifierQuestion,
 	type ClassifierRequest,
@@ -38,7 +39,8 @@ export interface SmallOptions extends CollectOptions {
 /**
  * Tool results of the run span `span` (entries after the run's user message) between
  * `smallResultMinChars` and `minResultChars`, under the same candidate rules as large outputs. With
- * `youngest`, only outputs whose call was made in a turn ≤ youngest (the mid-run age rule).
+ * `youngest`, only outputs whose call was made in a turn ≤ youngest (the mid-run age rule), and no
+ * recall outputs.
  */
 export function collectSmall(span: readonly ProjectedEntryLike[], options: SmallOptions, judged: ReadonlySet<string>, youngest = Number.POSITIVE_INFINITY): SmallItem[] {
 	const { toolCalls } = indexSpan(span);
@@ -49,6 +51,8 @@ export function collectSmall(span: readonly ProjectedEntryLike[], options: Small
 		if (!candidate || candidate.text.length >= options.minResultChars || judged.has(candidate.entryId)) continue;
 		const turn = candidate.turn ?? 0;
 		if (turn > youngest) continue;
+		// Mid-run (`youngest` given): recall outputs are left alone, see checkpoint.ts → collectCheckpoint.
+		if (Number.isFinite(youngest) && candidate.toolName === RECALL_TOOL) continue;
 		const { toolCallId: _id, turn: _turn, ...plain } = candidate;
 		// Skip outputs whose stub would not be shorter.
 		if (smallStub(plain).length >= plain.text.length) continue;
@@ -91,8 +95,7 @@ const isEditable = (entry: ProjectedEntryLike): boolean => {
 	return role === "user" || role === "assistant" || role === "toolResult";
 };
 
-const entryChars = (entry: ProjectedEntryLike): number =>
-	entry.messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content ?? "").length), 0);
+const entryChars = (entry: ProjectedEntryLike): number => entry.messages.reduce((n, m) => n + contentChars(m.content), 0);
 
 /** Exchanges smaller than this (model-visible characters) are never judged: the saving is not worth an edit. */
 export const EXCHANGE_MIN_CHARS = 2_000;
@@ -126,7 +129,8 @@ const editedByOthers = (entry: ProjectedEntryLike): boolean => {
  */
 export function collectExchanges(entries: readonly ProjectedEntryLike[], runStart: number, keepRecent: number, judged: ReadonlySet<string>): ExchangeItem[] {
 	const starts: number[] = [];
-	for (let i = 0; i < runStart; i++) if (entries[i].messages.some((m) => m.role === "user")) starts.push(i);
+	// Steering messages belong to the exchange they were sent in.
+	for (let i = 0; i < runStart; i++) if (entries[i].messages.some((m) => m.role === "user") && !isSteering(entries, i)) starts.push(i);
 	const exchanges: ExchangeItem[] = [];
 	starts.slice(0, Math.max(0, starts.length - keepRecent)).forEach((start, k) => {
 		const end = k + 1 < starts.length ? starts[k + 1] : runStart;

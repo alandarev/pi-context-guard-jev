@@ -214,7 +214,11 @@ So checkpoints pay for themselves only when the run goes on for roughly 8–30 m
 Anthropic: factor 16, rewrite = context after the read point the next request would get, or after the
 question when no logged entry is trusted, or the whole context with pinning off; other providers: factor
 16, rewrite = context from the first eligible output), assuming the run goes on
-about as long as it has run so far. In the measured Claude runs (8–14 requests) it never allowed a
+about as long as it has run so far. Context size is measured in text characters (`src/size.ts`): an image
+counts as about 3 characters per token (Anthropic: width × height / 750 tokens), not its base64 length, and a
+thinking signature counts at half its length. Counting the base64 once blocked every checkpoint in a long
+Claude run with screenshots (rewrite estimated at 2–22M characters for a 150–370k-token context).
+In the measured Claude runs (8–14 requests) it never allowed a
 checkpoint; in the GPT runs (26–37 requests) it allowed one or two. Turn it off to checkpoint purely for
 context room.
 

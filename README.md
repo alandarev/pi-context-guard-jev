@@ -331,8 +331,9 @@ Example:
   never more than `timeoutMs` (8 s). A mid-run checkpoint pauses the run the same way.
 - **Cost.** Each qualifying run costs a few Jev requests, measured at under $0.001 per run. The first prompt
   after an edit also has a one-time partial prompt-cache miss ([docs/CACHE.md](docs/CACHE.md)).
-- **Steering.** A message sent during a run starts a new span. Tool results from before it are never
-  distilled.
+- **Steering.** A message sent during a run joins the run's question. Outputs from before it can be distilled,
+  but the first edit before it rewrites the whole prompt cache once (the question pin moves to the steering
+  message).
 
 ## Examples (measured)
 

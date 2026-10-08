@@ -124,6 +124,21 @@ test("originalOutput on an omitted exchange's prompt returns the whole exchange"
 	assert.throws(() => originalOutput(branch[0] as never, "u1", []), /No tool result or omitted exchange/);
 });
 
+test("originalOutput of an omitted exchange includes its steering messages", () => {
+	const branch = [
+		{ id: "u1", type: "message", message: { role: "user", content: "Fix it" } },
+		{ id: "a1", type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "npm test" } }] } },
+		{ id: "r1", type: "message", message: { role: "toolResult", toolName: "bash", content: "fail" } },
+		{ id: "s1", type: "message", message: { role: "user", content: "look at the parser" } },
+		{ id: "a2", type: "message", message: { role: "assistant", content: "fixed the parser" } },
+		{ id: "u2", type: "message", message: { role: "user", content: "next" } },
+	];
+	assert.equal(
+		originalOutput(branch[0] as never, "u1", branch),
+		["## user", "Fix it", "## assistant", '[tool call] bash {"command":"npm test"}', "## tool result (bash)", "fail", "## user", "look at the parser", "## assistant", "fixed the parser"].join("\n"),
+	);
+});
+
 test("recall of an omitted exchange uses the record's exact list of omitted entries", () => {
 	const msg = (id: string, role: string, text: string) => ({ id, type: "message", message: { role, content: [{ type: "text", text }] } });
 	const branch: Record<string, unknown>[] = [

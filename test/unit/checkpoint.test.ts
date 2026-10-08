@@ -22,6 +22,7 @@ import {
 } from "../../src/checkpoint.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { MARKER } from "../../src/render.ts";
+import { collectSmall } from "../../src/items.ts";
 import type { ToolCallInfo } from "../../src/run.ts";
 import { assistant, lines, toolResult, user } from "./fixtures.ts";
 
@@ -319,6 +320,83 @@ test("anthropicRewriteChars: from the trusted read point, else from the question
 	// The same entry from another model, or expired: back to the question.
 	assert.equal(anthropicRewriteChars(entries, branch, [wrote("r2", "r2", { model: "x/y" })], MODEL, NOW, candidates), afterQuestion);
 	assert.equal(anthropicRewriteChars(entries, branch, [wrote("r2", "r2", { time: NOW - 10 * 60_000 })], MODEL, NOW, candidates), afterQuestion);
+});
+
+test("collectCheckpoint and collectSmall (mid-run): recall outputs are never eligible", () => {
+	const entries = run([
+		{ name: "recall", args: { entryId: "x" } },
+		{ name: "recall", args: { entryId: "y" }, text: "z".repeat(1_000) },
+		{ name: "bash", args: { command: "a" } },
+		{ name: "bash", args: { command: "b" } },
+		{ name: "bash", args: { command: "c" } },
+	]);
+	const info = collectCheckpoint(entries, options, new Set());
+	assert.ok(info);
+	assert.deepEqual(
+		info.candidates.map((c) => c.entryId),
+		["r2"],
+	);
+	const span = entries.slice(3);
+	const small = { ...options, minResultChars: 1_000_000, smallResultMinChars: 10 };
+	assert.deepEqual(
+		collectSmall(span, small, new Set(), 2).map((s) => s.entryId),
+		["r2"],
+	);
+	// At run end they are judged like any other output.
+	assert.deepEqual(
+		collectSmall(span, small, new Set()).map((s) => s.entryId),
+		["r0", "r1", "r2", "r3", "r4"],
+	);
+});
+
+/** `sized(6)` with a steering message after r2 (before a3). */
+const steered = () => {
+	const entries = sized(6);
+	const at = entries.findIndex((e) => e.sourceEntry.id === "a3");
+	return [...entries.slice(0, at), user("also check the parser", "s1"), ...entries.slice(at)];
+};
+
+test("collectCheckpoint: outputs from before a steering message stay eligible; the question has both messages", () => {
+	const entries = steered();
+	const info = collectCheckpoint(entries, options, new Set());
+	assert.ok(info);
+	assert.deepEqual(
+		info.candidates.map((c) => c.entryId),
+		["r0", "r1", "r2", "r3"],
+	);
+	assert.equal(info.currentTurn, 5);
+	assert.match(info.question, /^Fix the tests\n\n\[The user added during the run\] also check the parser$/);
+});
+
+test("anthropicRewriteChars: the pin is on the steering message, so earlier edits rewrite everything", () => {
+	const entries = steered();
+	const branch = branchOf(entries);
+	const pin = entries.findIndex((e) => e.sourceEntry.id === "s1");
+	// After the steering message only: from the pin.
+	assert.equal(anthropicRewriteChars(entries, branch, [], MODEL, NOW, new Set(["r3", "r4"])), contextChars(entries.slice(pin + 1)));
+	// An output before it: no readable pin, everything.
+	assert.equal(anthropicRewriteChars(entries, branch, [], MODEL, NOW, new Set(["r1", "r4"])), contextChars(entries));
+	// A trusted read point before the output still applies.
+	const fromR0 = anthropicRewriteChars(entries, branch, [wrote("r0", "r0")], MODEL, NOW, new Set(["r1"]));
+	assert.equal(fromR0, contextChars(entries.slice(entries.findIndex((e) => e.sourceEntry.id === "r0") + 1)));
+});
+
+test("exchangeMemo: a steering message does not reset the run's memo", () => {
+	const record = (results: Record<string, unknown>[]) => ({ type: "custom", customType: "context-guard", data: { v: 1, phase: "mid-run", results } });
+	const branch = [
+		{ type: "message", id: "u1", message: { role: "user" } },
+		{ type: "message", id: "a1", message: { role: "assistant", content: [{ type: "toolCall", id: "c1" }] } },
+		{ type: "message", id: "r1", message: { role: "toolResult" } },
+		record([{ kind: "exchange", entryId: "x1", reason: "relevant" }]),
+		{ type: "context_edit", targetId: "r1" },
+		{ type: "message", id: "s1", message: { role: "user" } },
+		{ type: "message", id: "a2", message: { role: "assistant", content: [{ type: "toolCall", id: "c2" }] } },
+		{ type: "message", id: "s2", message: { role: "user" } },
+	];
+	assert.deepEqual([...exchangeMemo(branch, "context-guard")], ["x1"]);
+	// After an answer, the next user message starts a new run.
+	const next = [...branch, { type: "message", id: "a3", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, { type: "message", id: "u2", message: { role: "user" } }];
+	assert.deepEqual([...exchangeMemo(next, "context-guard")], []);
 });
 
 test("exchangeMemo: exchange results of the current run only; memoFromBranch ignores exchanges", () => {
