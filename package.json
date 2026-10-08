@@ -1,7 +1,7 @@
 {
   "name": "pi-context-guard-jev",
-  "version": "0.3.0",
-  "description": "Keep your Pi context lean: the Jev classifier trims big tool outputs to the lines your work still needs, drops stale small outputs and unrelated old exchanges, at run end and during long autonomous runs. Verbatim, recallable, cache-aware, savings in the status bar.",
+  "version": "0.3.1",
+  "description": "Pi extension that removes tool output the agent no longer needs from its context. The Jev classifier keeps the needed lines verbatim; stale small outputs, unrelated old exchanges and old screenshots become one-line notes. Everything can be recalled.",
   "type": "module",
   "license": "MIT",
   "author": "alandarev",

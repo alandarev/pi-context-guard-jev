@@ -139,7 +139,7 @@ The summary gets a `long` block: per-request contexts (input + cacheRead + cache
 totals of input/cacheRead/cacheWrite/output and the main-model cost Pi reports, every `context-guard`
 record with its phase, saved characters, Jev ms and cost, and the request before and after it (context,
 cacheRead, cacheWrite), whether the suite is green, `recall` calls, and repeated non-suite tool calls (lost
-outputs searched again). Results are in the README ("Long autonomous runs") and in
+outputs searched again). Results are in [RESULTS.md](RESULTS.md#long-autonomous-runs) and in
 [CACHE.md](CACHE.md#mid-run-checkpoints).
 
 **`topics` scenario.** Five prompts in the generated StatusBadge repo: which API clients retry on 503; a
@@ -148,7 +148,7 @@ the API clients that retry on 503: which of them also retry on 502?". The summar
 the context of each prompt's first request and its usage, the exchange results (phase, prompt, outcome,
 P), the small-output results, the last prompt's tool calls and whether it used `recall`, and whether its
 answer names exactly the clients whose file has both `=== 503` and `=== 502` (a crude check: it fails on
-answers that also list clients to say they do not qualify). Results are in the README (example D) and in
+answers that also list clients to say they do not qualify). Results are in [RESULTS.md](RESULTS.md#examples) (example D) and in
 [CACHE.md](CACHE.md#old-exchanges).
 
 **API-shape probe.** `CG_OMIT_AT_TURN=2 node test/e2e/run-e2e.mjs --model … --no-guard --ext
@@ -225,14 +225,14 @@ node test/e2e/run-e2e.mjs --model anthropic/claude-sonnet-5-5 --ext ~/.pi/agent/
 | GPT-6 Luna, badge, with / without guard | turn 2 cacheRead 2,560 / 13,824 |
 | GPT-6 Luna, badge, with history (default) | 36,113 → ~2.3k chars; 9/9 checks pass (a run in parallel with 4 others had one OpenAI cache miss on turn 2: 8/9) |
 | GPT-6 Luna / Claude Sonnet 5.5, history on / off | See [JEV.md](JEV.md#earlier-conversation-historyexchanges): 2 rounds × 4 runs |
-| GPT-6 Luna / Claude Sonnet 5.5, long (mid-run checkpoints) | See the README, "Long autonomous runs"; all suites green, no `recall` |
-| GPT-6 Luna / Claude Sonnet 5.5, topics, guard on / off | See the README, example D |
+| GPT-6 Luna / Claude Sonnet 5.5, long (mid-run checkpoints) | See [RESULTS.md](RESULTS.md#long-autonomous-runs); all suites green, no `recall` |
+| GPT-6 Luna / Claude Sonnet 5.5, topics, guard on / off | See [RESULTS.md](RESULTS.md#examples), example D |
 
 See [CACHE.md](CACHE.md) for what the cache numbers mean.
 
 ## Real-world examples (`examples.mjs`)
 
-The README's "Examples (measured)" section comes from `test/e2e/examples.mjs`. It runs the same prompts on
+The examples in [RESULTS.md](RESULTS.md#examples) come from `test/e2e/examples.mjs`. It runs the same prompts on
 real public code twice, with context-guard on and with it off (`--no-guard`), and compares the first
 request of the follow-up turn.
 
@@ -262,7 +262,7 @@ model saw.
 Pi from list prices (most of it Claude in example A; GPT runs used a subscription). About 5 minutes with 4
 parallel jobs.
 
-**Findings** (details in the README):
+**Findings** (details in [RESULTS.md](RESULTS.md#examples)):
 
 - Next-request context, on / off: A Claude 15.5k / 28.2k tokens, A GPT 11.5k / 34.3k, C GPT 9.2k / 35.3k,
   B GPT 5.7k / 7.5k; all follow-ups correct, none needed `recall`.
