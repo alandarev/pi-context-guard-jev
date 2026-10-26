@@ -146,9 +146,17 @@ export async function processItems(
 
 export const emptyOutcome = (): ProcessOutcome => ({ edits: [], records: [], savedChars: 0, requests: 0, inputTokens: 0, costUsd: 0, ms: 0, timedOut: false });
 
-/** Add the removal of old images (no Jev request; images.ts) to `outcome`. */
+/**
+ * Add the removal of old images (no Jev request; images.ts) to `outcome`. Results the outcome already
+ * edits are skipped: Pi applies a session's context_edits in order and the last one for an entry wins, so
+ * an image stub after an exchange omission (`replacement: null`) would bring the tool result back without
+ * its omitted tool call (Anthropic: 400 "unexpected `tool_use_id` found in `tool_result` blocks"), and one
+ * after a distillation would undo it. Skipped images stay eligible for a later pass.
+ */
 export function addImages(outcome: ProcessOutcome, items: readonly ImageItem[]): void {
+	const edited = new Set(outcome.edits.map((e) => e.targetId));
 	for (const item of items) {
+		if (edited.has(item.entryId)) continue;
 		outcome.edits.push({ type: "context_edit", targetId: item.entryId, replacement: { content: item.replacement } });
 		outcome.records.push({
 			kind: "image",

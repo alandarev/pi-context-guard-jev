@@ -22,7 +22,7 @@ These need Node ≥ 22.18, which runs the `.ts` files directly. There is no netw
 | `render.test.ts` | Labels, verbatim chunks with omission lines, `read` offsets, file lists, full removal |
 | `cache-pin.test.ts` | Question pin: API-key and OAuth payloads, trailing system messages, TTL selection and `ttl-conflict`, string content, tool-result-only messages, over-budget restore. Anchors: question > read > write priority, read anchor inside a batch of tool_result blocks, breakpoint budget (identity and tools breakpoints dropped, then write, then read; the question survives a foreign breakpoint), not found / last message / already marked, normalized tool ids, TTL order, `markedToolResults` |
 | `stats.test.ts` | Savings from the projection (images by pixels), run records (checkpoints counted), lifetime total and `compacted`, status texts (`🛡 0 · Σ−79k`) and colours, cost format |
-| `images.test.ts` | Old images: age rule, keep-turns 0/1/3, stub text and sizes, user images / already removed / foreign-edited results skipped |
+| `images.test.ts` | Old images: age rule, keep-turns 0/1/3, stub text and sizes, user images / already removed / foreign-edited results skipped, results the same pass already omits or distills keep that edit (no orphaned tool result) |
 | `size.test.ts` | Image sizes from PNG/JPEG/GIF/WebP headers, image tokens by pixels (not base64 length), thinking and tool-call sizes, `contextChars` with screenshots |
 | `recall.test.ts` | Original output, pattern (length cap, 4,000-char match window, catastrophic-regex timeout), offset/limit, line and byte caps, oversized lines |
 | `config.test.ts` | Defaults, validation and ranges (incl. `historyExchanges` 0–10 integer and the `midRun*` settings), `provider/id` parsing, load/save round trip |

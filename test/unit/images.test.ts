@@ -69,3 +69,19 @@ test("imageStub: several images, unknown sizes", () => {
 	);
 	assert.equal(imageStub({ entryId: "x", images: 1, imageTokens: 1_600, age: 3 }, []), `${MARKER} Removed 1 image from this output (~1.6k tokens), 3 turns old. recall({"entryId":"x"}) shows it again.`);
 });
+
+test("addImages: results the outcome already edits keep that edit (no orphaned tool_result)", async () => {
+	const { addImages, emptyOutcome } = await import("../../src/process.ts");
+	const items = collectImages(shotRun(), 3);
+	const outcome = emptyOutcome();
+	// An exchange omission already removed a1 and r1 (its tool call and result).
+	outcome.edits.push({ type: "context_edit", targetId: "a1", replacement: null }, { type: "context_edit", targetId: "r1", replacement: null });
+	addImages(outcome, items);
+	const forR1 = outcome.edits.filter((e) => e.targetId === "r1");
+	assert.deepEqual(forR1, [{ type: "context_edit", targetId: "r1", replacement: null }], "no image stub resurrects r1 after its omission");
+	assert.deepEqual(
+		outcome.records.map((r) => r.entryId),
+		["r2"],
+	);
+	assert.equal(outcome.savedChars, items[1].beforeChars - items[1].afterChars);
+});
