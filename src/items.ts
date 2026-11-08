@@ -5,6 +5,7 @@
  * other entry (`replacement: null`).
  */
 import { MARKER, RECALL_TOOL, formatChars, toolLabel } from "./render.ts";
+import { argsElided } from "./args.ts";
 import { supersededBy } from "./checkpoint.ts";
 import { contentChars } from "./size.ts";
 import { type Candidate, type CollectOptions, candidateOf, indexSpan, isSteering, type RunHistory } from "./run.ts";
@@ -19,7 +20,7 @@ import {
 	textOf,
 } from "./types.ts";
 
-export type ItemKind = "large" | "small" | "exchange" | "image";
+export type ItemKind = "large" | "small" | "exchange" | "image" | "args";
 
 // ---------------------------------------------------------------------------------------------
 // Small outputs
@@ -103,14 +104,15 @@ export const EXCHANGE_MIN_CHARS = 2_000;
 /**
  * True when the model sees something other than the raw entry and the difference is not ours: another
  * extension (or Pi's overflow recovery) replaced or omitted it. `recall` returns raw entries, so whatever
- * that edit put in place could not be recovered after the exchange is omitted.
+ * that edit put in place could not be recovered after the exchange is omitted. Our own shortened tool-call
+ * arguments (args.ts) do not count.
  */
 const editedByOthers = (entry: ProjectedEntryLike): boolean => {
 	const raw = entry.sourceEntry.message;
 	if (!raw) return false;
 	if (entry.messages.length === 0) return true;
 	const projected = entry.messages[0];
-	if (projected === raw) return false;
+	if (projected === raw || argsElided(projected, raw)) return false;
 	const text = textOf(projected);
 	return !text.startsWith(MARKER) && (text !== textOf(raw) || JSON.stringify(projected.content) !== JSON.stringify(raw.content));
 };

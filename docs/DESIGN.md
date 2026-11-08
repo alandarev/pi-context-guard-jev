@@ -15,14 +15,15 @@ evidence behind the thresholds are in [JEV.md](JEV.md). Cache behaviour is in [C
 | `src/decide.ts` | `buildRequest` (the run-end Jev request), `buildCheckpointRequest` (the mid-run one) and `interpret` (answers → keep set); `citedFiles` |
 | `src/distill.ts` | `distillRun`: chunk, run Jev requests in parallel within a time budget, decide per result, build `context_edit` drafts |
 | `src/items.ts` | Whole items: small outputs (`collectSmall`) and old exchanges (`collectExchanges`), their Jev requests, stubs and edits, and `judgeItems` (batched, parallel, time budget) |
-| `src/process.ts` | `processItems`: large outputs, small outputs and old exchanges of one pass, judged in parallel and merged into one list of edits and records; `addImages` adds the image removals |
+| `src/process.ts` | `processItems`: large outputs, small outputs and old exchanges of one pass, judged in parallel and merged into one list of edits and records; `addImages` and `addArgs` add the image removals and shortened arguments |
 | `src/images.ts` | Old images: `collectImages` (tool results with images at least `imageKeepTurns` old), their stub and replacement |
+| `src/args.ts` | Old tool-call arguments: `collectArgs` (assistant messages with calls at least `argKeepTurns` old), `elideString` (head, marker line, tail), the replacement, `argsElided` (ours?), `originalCalls` (recall) |
 | `src/size.ts` | Context size in text characters: images by pixels (width × height ÷ 750 tokens × 4), thinking signatures at half, image headers (PNG/JPEG/GIF/WebP) |
 | `src/render.ts` | The replacement text: header, verbatim chunks, omission lines; the `[context-guard]` marker |
 | `src/cache-pin.ts` | Anthropic breakpoints: the previous user question, and the read point after edits (`placeGuardBreakpoints`) |
 | `src/stats.ts` | Savings and Jev usage computed from the session; status-bar text |
 | `src/health.ts` | Jev failures: a pass whose every request failed sets `Jev failing: <status> <message>` in the status bar, warns once, pauses requests for 5 min after a 401/402/403; a success clears it |
-| `src/recall.ts` | What `recall` returns (a tool output with its images, or the transcript of an omitted exchange with its user images) |
+| `src/recall.ts` | What `recall` returns (a tool output with its images, the original tool calls of an assistant message, or the transcript of an omitted exchange with its user images) |
 | `src/types.ts` | Loose structural types for the Pi objects used, so the pure modules can be tested without Pi |
 
 Everything except `index.ts` is pure. `distillRun` gets the classifier as an injected function.
@@ -250,12 +251,12 @@ message; spans without assistant and tool-result messages) are accepted by Anthr
 `pi-claude-auth`) and OpenAI Codex, checked live with `test/e2e/omit-probe.ts` and the `topics` scenario.
 
 **Run-end break-even for the run's own edits** (`runEndBreakEven`, on). Checked first: the run's distilled
-or removed outputs and its image removals must pass `paysOff` with their whole rewrite (`rewriteCharsFor`)
+or removed outputs, its image removals and its shortened arguments must pass `paysOff` with their whole rewrite (`rewriteCharsFor`)
 and as many later requests as the session has had so far. Otherwise they are dropped and their results say
 `kept` / `no-payoff`. Measured on 3 weeks of real sessions (`test/analysis/gate.py`), ungated run ends
 cost more in cache rewrites than they saved on OpenAI Codex (any edit rewrites the whole cache); with the
 gate (factor 13) the run-end net rose from −$74 to +$95 (Codex) and from +$154 to +$784 (Anthropic).
-Exchanges and old images are then gated on top of the accepted output edits.
+Exchanges, old images and old arguments are then gated on top of the accepted output edits.
 
 **Run-end break-even for exchanges** (`exchangeBreakEven`, on). After the pass is judged, its exchange
 omissions are checked: their marginal cache cost is the rewrite with them minus the rewrite the pass's
@@ -283,6 +284,48 @@ unavailable, a pass still removes images. At run end, images from before the run
 same marginal-cost gate as exchanges (`exchangeBreakEven`, with no minimum saving); deferred ones are just
 collected again next time. Mid-run, images count towards the batch; the tiers are: everything; without
 exchanges; without exchanges and images from before the last user message.
+
+**Old tool-call arguments** (`args.ts → collectArgs`, `argKeepTurns`, 4; `argMinChars`, 2,000;
+`argStubProviders`, `["openai-codex"]`). Measured on 3 weeks of real sessions, string arguments of at least
+2,000 characters in calls at least 4 assistant turns old were ~8% of all context (`write` ≈ 48%, long `bash`
+commands and heredocs ≈ 37%, then codemode, `edit`, subagent prompts). Every assistant message in the
+projection, earlier runs included, that at least `argKeepTurns` assistant messages follow, when the session's
+model provider is in `argStubProviders`. A call is touched only if its tool result is in the projection and
+not an error (a failed call is often retried with a corrected value, which the model must still see), and
+never for `recall`. Every string leaf of its arguments (also inside objects and arrays, such as `edit`'s
+`edits[].oldText`/`newText`) that would shrink by at least `argMinChars` keeps its first 12 and last 6 lines
+(at most 600 characters each) with one marker line between them:
+`[context-guard: 9.8k chars / 140 lines omitted here afterwards to save context; the call ran with the full value and succeeded. recall({"entryId":"<assistant entry id>"}) shows it]`.
+Keys, short values and the structure stay. The replacement is a `context_edit` of the assistant entry with
+the whole content array copied (text, thinking blocks with their signatures, tool-call ids and names), one
+edit per entry for all its calls. Skipped: messages the model sees changed (by us, by another extension,
+or omitted with an exchange); like images, a pass never adds one for an entry it already edits, so an
+exchange omission wins. `argsElided` recognises our edit (marker lines in the arguments, raw entry without
+them, nothing else changed): `editedByOthers` ignores it (the exchange stays eligible, and its omission
+covers the shortened message, which `recall` shows from the raw entry), and stats count it. Records have
+`kind: "args"`, `requests: 0`, reason `N turns old`, label `write src/a.ts +1 call (2 args)`. Gates as for
+images: mid-run they count towards the batch with the same tiers (the last tier keeps only calls after the
+last user message); at run end calls of the current run join its own edits (`runEndBreakEven`), older ones
+go with the early images (`exchangeBreakEven`). Arguments are never sent to Jev.
+
+Live probes (`test/e2e/args-probe.ts`, `args-probe-run.mjs`: three `write` calls of ~1.6k characters, the
+earlier ones shortened at each turn boundary, mid-run within the tool loop or only those of an earlier run):
+both providers accept the edited history, including assistant messages with signed thinking blocks, mid-run
+and across runs (0 provider errors in 12 runs: `anthropic/claude-haiku-5-5` thinking high with
+`pi-claude-auth`, `anthropic/claude-sonnet-4-6`, `openai-codex/gpt-5.6-luna`). The model's reaction decides
+the provider list:
+- A whole-value stub (`[context-guard] Omitted 2.2k chars of this argument…`) made Haiku believe it had
+  written the stub into the file: with every earlier call stubbed it rewrote `a.txt` and `b.txt` in a loop
+  (stopped after 15 minutes); at 4 turns it read the file back to check. Hence head and tail stay.
+- With the head/tail format, Haiku still took the marker line for something it had written, in all 4 runs
+  (2 mid-run at 4 turns, 2 earlier-run): its thinking says "my content included a stray [context-guard
+  line", 2 runs spent an extra `grep`/`tail` on the files, and every final answer flagged a "discrepancy"
+  or "problem with my earlier writes". Sonnet 4.6 (1 mid-run run) and Codex luna (mid-run and earlier-run)
+  went on without remarks or extra calls.
+
+So `argStubProviders` defaults to OpenAI Codex only. Adding `anthropic` risks the confusion above (extra
+calls, wrong reports to the user, at worst repeated writes); larger Claude models may cope, as Sonnet did
+in one run, but that is not verified.
 
 **Batching.** Whole items are grouped into requests of at most `maxSegmentChars` characters of item text and
 `maxChunksPerSegment` (40) items, under the same `timeoutMs` budget; the three kinds run at the same time,
@@ -422,11 +465,11 @@ Each run (and each mid-run checkpoint) that made at least one Jev request also a
 | `requests`, `inputTokens`, `costUsd`, `ms` | Jev usage for the run |
 | `timedOut` | The time budget ran out |
 | `errors`, `error` | Jev requests that failed with an error (not timeouts), and the first error message (≤ 400 chars); absent when none failed |
-| `results[]` | One per item: `kind` (`large`, `small`, `exchange`; absent means large), `entryId` (for an exchange, its prompt entry), `tool`, `label`, `outcome` (`distilled`, `removed`, `kept`), `reason`, `beforeChars`, `afterChars`, `jev` |
+| `results[]` | One per item: `kind` (`large`, `small`, `exchange`, `image`, `args`; absent means large), `entryId` (for an exchange, its prompt entry), `tool`, `label`, `outcome` (`distilled`, `removed`, `kept`), `reason`, `beforeChars`, `afterChars`, `jev` |
 
 `reason` is one of `chunks`, `none-needed`, `not-worth`, `all-chunks`, `whole-needed`, `whole-chosen`,
 `no-answer`, `error` or `timeout` (several are joined with commas) for large outputs, `needed` or
-`not-needed` for small outputs, and `relevant`, `unrelated` or `deferred` for exchanges (an omitted exchange's
+`not-needed` for small outputs, `N turns old` for images and arguments, and `relevant`, `unrelated` or `deferred` for exchanges (an omitted exchange's
 result also has `omitted`, the entry ids that got `replacement: null`). Whole items have the trace
 `p.06` (P of the bool). `jev` holds one trace per segment, such as
 `kw.15 focus=chunk_4:.52 keep 9/29` or `kw.82 focus=whole:.71 keep all (whole-needed)`. That is
@@ -442,7 +485,8 @@ Nothing is kept in memory. Every redraw recomputes from the session:
 - **Savings:** Pi's session projection (`buildSessionProjection()`) is checked for tool results whose
   model-visible text starts with `[context-guard]` while the raw entry does not; each one adds raw size
   minus visible size (`size.ts`: text length, images by pixels). Results that lost only their images count
-  as image results. A prompt that shows the exchange stub adds the raw size of its exchange (the
+  as image results. Assistant messages with our shortened arguments (`argsElided`) add raw minus visible
+  size too and count per shortened tool call. A prompt that shows the exchange stub adds the raw size of its exchange (the
   prompt and the entries up to the next prompt that the model no longer sees: Pi keeps an omitted
   entry in the projection with no messages) minus the stub.
   Tokens are estimated as characters ÷ 4.
@@ -453,7 +497,7 @@ Nothing is kept in memory. Every redraw recomputes from the session:
 So the numbers follow branches, `/tree`, reloads and compaction.
 
 The ready-state footer is `🛡 −4.2k · 1`: ≈ tokens kept out of context · distilled outputs, outputs without
-their images and omitted exchanges (the first part in the theme's success colour, the rest dimmed). Before
+their images, tool calls with shortened arguments and omitted exchanges (the first part in the theme's success colour, the rest dimmed). Before
 anything is distilled it shows `🛡 0 saved`. After a compaction dropped earlier edits it adds the lifetime
 total: `🛡 0 · Σ−79k`, or `🛡 −4.2k · 3 · Σ−83k` once new edits exist (only when Σ is larger).
 
@@ -461,7 +505,9 @@ total: `🛡 0 · Σ−79k`, or `🛡 −4.2k · 3 · Σ−83k` once new edits e
 
 `recall` reads the raw entry with `ctx.sessionManager.getEntry(entryId)`. `context_edit` never changes that
 entry. For a tool result it returns the output and its images (image blocks after the text, at most 6, only
-for a plain recall: with `pattern` or `offset` a note says how many there are); for a user prompt (the stub of an omitted exchange) it
+for a plain recall: with `pattern` or `offset` a note says how many there are); for an assistant message
+with tool calls (shortened arguments) it returns each call as `[tool call] name` followed by
+`--- key ---` sections with the original values (strings as they are, other values as indented JSON); for a user prompt (the stub of an omitted exchange) it
 returns a transcript of the raw exchange from the branch: `## user`, `## assistant` with the text and
 `[tool call] name {arguments}` lines, `## tool result (tool)` and `## custom message (type)` sections, for
 exactly the entries the latest record lists as `omitted` (without such a record, up to the next prompt).

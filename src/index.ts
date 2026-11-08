@@ -35,12 +35,26 @@ import {
 } from "./checkpoint.ts";
 import { buildCheckpointRequest } from "./decide.ts";
 import { type GuardConfig, loadConfig, parseModelRef, saveConfigPatch } from "./config.ts";
+import { ARG_MARKER, type ArgsItem, collectArgs } from "./args.ts";
 import { collectImages, type ImageItem } from "./images.ts";
 import { omittedIdsFor, originalContent, RECALL_MAX_IMAGES, recallText } from "./recall.ts";
 import { clipError, failureFromRecord, failureStatus, failureWarning, type JevFailure, nextJevFailure } from "./health.ts";
 import { formatChars, MARKER, RECALL_TOOL } from "./render.ts";
 import { collectExchanges, collectSmall, type ExchangeItem, type SmallItem, type WorkContext } from "./items.ts";
-import { addImages, deferExchanges, dropImages, dropOutputs, emptyOutcome, outputEdits, exchangeOmissions, type ProcessOptions, type ProcessOutcome, processItems } from "./process.ts";
+import {
+	addArgs,
+	addImages,
+	deferExchanges,
+	dropOutputs,
+	dropRuleEdits,
+	emptyOutcome,
+	exchangeOmissions,
+	outputEdits,
+	type ProcessOptions,
+	type ProcessOutcome,
+	processItems,
+	ruleEdits,
+} from "./process.ts";
 import { collectRun, findRunStart, lastUserIndex, type RunInfo } from "./run.ts";
 import {
 	CUSTOM_TYPE,
@@ -162,9 +176,9 @@ export default function contextGuard(pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => refreshStatus(ctx));
 
 	/**
-	 * Process every kind of item with the busy status shown. Old images need no Jev request: with nothing
-	 * else to judge, or when Jev is unavailable, the outcome holds just them. Undefined when there is
-	 * nothing to do or distillation failed.
+	 * Process every kind of item with the busy status shown. Old images and tool-call arguments need no Jev
+	 * request: with nothing else to judge, or when Jev is unavailable, the outcome holds just them.
+	 * Undefined when there is nothing to do or distillation failed.
 	 */
 	const processWithStatus = async (
 		ctx: ExtensionContext,
@@ -172,13 +186,15 @@ export default function contextGuard(pi: ExtensionAPI) {
 		small: SmallItem[],
 		exchanges: ExchangeItem[],
 		images: ImageItem[],
+		args: ArgsItem[],
 		work: WorkContext,
 		options: ProcessOptions,
 	): Promise<ProcessOutcome | undefined> => {
 		const withImages = (outcome: ProcessOutcome | undefined): ProcessOutcome | undefined => {
-			if (images.length === 0) return outcome;
+			if (images.length === 0 && args.length === 0) return outcome;
 			const result = outcome ?? emptyOutcome();
 			addImages(result, images);
+			addArgs(result, args);
 			return result;
 		};
 		if (run.candidates.length === 0 && small.length === 0 && exchanges.length === 0) return withImages(undefined);
@@ -303,7 +319,11 @@ export default function contextGuard(pi: ExtensionAPI) {
 		return paysOff(savedChars, requests, marginal, factor);
 	};
 
-	const imageSaving = (images: readonly ImageItem[]): number => images.reduce((n, i) => n + i.beforeChars - i.afterChars, 0);
+	const imageSaving = (items: readonly (ImageItem | ArgsItem)[]): number => items.reduce((n, i) => n + i.beforeChars - i.afterChars, 0);
+
+	/** Old tool calls with long arguments, when the session's provider is in `argStubProviders`. */
+	const collectArgsFor = (ctx: ExtensionContext, entries: ProjectedEntryLike[]): ArgsItem[] =>
+		config.argStubProviders.includes(ctx.model?.provider ?? "") ? collectArgs(entries, config.argKeepTurns, config.argMinChars) : [];
 
 	pi.on("turn_end", async (event, ctx) => {
 		if (!config.enabled || !config.midRun || event.outcome !== "completed") return;
@@ -319,35 +339,38 @@ export default function contextGuard(pi: ExtensionAPI) {
 		const small = config.smallResultMinChars > 0 ? collectSmall(entries.slice(runStart + 1), config, memo, info.currentTurn - config.midRunMinAgeTurns) : [];
 		let exchanges = config.pruneExchanges ? collectExchanges(entries, runStart, config.keepRecentExchanges, exchangeMemo(branch, CUSTOM_TYPE)) : [];
 		let images = collectImages(entries, config.imageKeepTurns);
+		let args = collectArgsFor(ctx, entries);
 		const outputChars = info.pendingChars + small.reduce((n, item) => n + item.text.length, 0);
 		// Only checkpoint when the batch is big enough and its one-time cache rewrite is likely to pay off
-		// (checkpoint.ts → paysOff). Old exchanges and images of earlier runs come early, so they move the
-		// rewrite start back: if the whole batch does not pay off, try without exchanges, then also without
-		// images from before the last user message.
+		// (checkpoint.ts → paysOff). Old exchanges, images and tool-call arguments of earlier runs come early,
+		// so they move the rewrite start back: if the whole batch does not pay off, try without exchanges,
+		// then also without images and arguments from before the last user message.
 		const pin = lastUserIndex(entries);
 		const recentImages = images.filter((i) => i.index > pin);
+		const recentArgs = args.filter((a) => a.index > pin);
 		const tiers = [
-			{ exchanges, images },
-			{ exchanges: [], images },
-			{ exchanges: [], images: recentImages },
+			{ exchanges, images, args },
+			{ exchanges: [], images, args },
+			{ exchanges: [], images: recentImages, args: recentArgs },
 		];
 		const factor = ctx.model?.provider === "openai-codex" ? BREAK_EVEN_FACTOR.full : BREAK_EVEN_FACTOR.prefix;
 		const outputIds = [...info.candidates.map((c) => c.entryId), ...small.map((s) => s.entryId)];
 		const turns = info.currentTurn + 1;
 		const chosen = tiers.find((tier) => {
-			const chars = outputChars + imageSaving(tier.images) + tier.exchanges.reduce((n, item) => n + item.chars, 0);
+			const chars = outputChars + imageSaving(tier.images) + imageSaving(tier.args) + tier.exchanges.reduce((n, item) => n + item.chars, 0);
 			if (chars < batchCharsFor(ctx)) return false;
 			if (!config.midRunBreakEven) return true;
-			const ids = new Set([...outputIds, ...tier.images.map((i) => i.entryId), ...tier.exchanges.map((e) => e.entryId)]);
+			const ids = new Set([...outputIds, ...tier.images.map((i) => i.entryId), ...tier.args.map((a) => a.entryId), ...tier.exchanges.map((e) => e.entryId)]);
 			return paysOff(chars, turns, rewriteCharsFor(ctx, entries, ids), factor);
 		});
 		if (!chosen) return;
 		exchanges = chosen.exchanges;
 		images = chosen.images;
+		args = chosen.args;
 
 		const run: RunInfo = { question: info.question, answer: "", notes: info.notes, candidates: info.candidates, toolResults: 0, history: info.history };
 		const work: WorkContext = { question: info.question, history: info.history, latest: info.latest, notes: info.notes };
-		const outcome = await processWithStatus(ctx, run, small, exchanges, images, work, {
+		const outcome = await processWithStatus(ctx, run, small, exchanges, images, args, work, {
 			...config,
 			minRunChars: 0,
 			chunkKeepThreshold: config.midRunChunkKeepThreshold,
@@ -376,26 +399,27 @@ export default function contextGuard(pi: ExtensionAPI) {
 		const small = config.smallResultMinChars > 0 ? collectSmall(entries.slice(runStart + 1), config, new Set()) : [];
 		const exchanges = config.pruneExchanges ? collectExchanges(entries, runStart, config.keepRecentExchanges, exchangeMemo(branchOf(ctx), CUSTOM_TYPE)) : [];
 		const images = collectImages(entries, config.imageKeepTurns);
-		if (run.candidates.length === 0 && small.length === 0 && exchanges.length === 0 && images.length === 0) return;
+		const args = collectArgsFor(ctx, entries);
+		if (run.candidates.length === 0 && small.length === 0 && exchanges.length === 0 && images.length === 0 && args.length === 0) return;
 		const work: WorkContext = { question: run.question, history: run.history ?? { exchanges: [] }, answer: run.answer };
 
-		const outcome = await processWithStatus(ctx, run, small, exchanges, images, work, config);
+		const outcome = await processWithStatus(ctx, run, small, exchanges, images, args, work, config);
 		if (!outcome || (outcome.requests === 0 && outcome.edits.length === 0)) return;
 		// Break-even gates in order, each on top of the edits accepted before it: this run's own edits
-		// (outputs and its images), then old exchanges, then images of earlier runs (before this run's
-		// prompt), which move the cache rewrite back like exchanges do. On OpenAI Codex any edit rewrites
-		// the whole cache, so a run end that only distils a little would cost more than it saves.
-		const early = images.filter((i) => i.index < runStart);
-		const own = outputEdits(outcome, new Set(images.filter((i) => i.index > runStart).map((i) => i.entryId)));
+		// (outputs, its images and tool-call arguments), then old exchanges, then images and arguments of
+		// earlier runs (before this run's prompt), which move the cache rewrite back like exchanges do. On
+		// OpenAI Codex any edit rewrites the whole cache, so a run end that only distils a little would cost
+		// more than it saves.
+		// Only the image and argument edits the pass made (an exchange omission wins over them, see addImages).
+		const early = ruleEdits(outcome, new Set([...images, ...args].filter((i) => i.index < runStart).map((i) => i.entryId)));
+		const own = outputEdits(outcome, new Set([...images, ...args].filter((i) => i.index > runStart).map((i) => i.entryId)));
 		if (config.runEndBreakEven && !earlyEditsPayOff(ctx, entries, new Set(), own.ids, own.savedChars, 0)) {
 			dropOutputs(outcome, own.ids);
 			own.ids.clear();
 		}
 		if (config.exchangeBreakEven && !exchangesPayOff(ctx, entries, outcome, own.ids)) deferExchanges(outcome);
 		const accepted = new Set([...own.ids, ...exchangeOmissions(outcome).ids]);
-		if (config.exchangeBreakEven && !earlyEditsPayOff(ctx, entries, accepted, new Set(early.map((i) => i.entryId)), imageSaving(early), 0)) {
-			dropImages(outcome, new Set(early.map((i) => i.entryId)));
-		}
+		if (config.exchangeBreakEven && !earlyEditsPayOff(ctx, entries, accepted, early.ids, early.savedChars, 0)) dropRuleEdits(outcome, early.ids);
 		if (outcome.requests === 0 && outcome.edits.length === 0) return;
 		if (outcome.timedOut) warnOnce(ctx, "timeout", `Jev did not finish within ${config.timeoutMs} ms; some items were left as they are.`);
 		// The runner REPLACES the draft list with our return value: keep other extensions' drafts.
@@ -440,9 +464,11 @@ export default function contextGuard(pi: ExtensionAPI) {
 		label: "Recall",
 		description:
 			`Return the original of something context-guard distilled or omitted (its text starts with "${MARKER}"): a tool output, ` +
-			"or a whole earlier exchange (prompt, replies, tool calls and results), or images removed from an output (they come back as images). Pass the entryId from that note. Optionally pass a regex `pattern` to get only matching lines (with line numbers), " +
+			"or a whole earlier exchange (prompt, replies, tool calls and results), or images removed from an output (they come back as images), " +
+			`or the full arguments of an earlier tool call whose long values were shortened afterwards (a "${ARG_MARKER}…]" line inside the value; the call itself ran with the full value). ` +
+			"Pass the entryId from that note. Optionally pass a regex `pattern` to get only matching lines (with line numbers), " +
 			"and `offset`/`limit` (1-based) to page through a long output; with a `pattern` they count matching lines.",
-		promptSnippet: `recall: fetch the full original of a tool output or earlier exchange marked "${MARKER}"`,
+		promptSnippet: `recall: fetch the full original of a tool output or earlier exchange marked "${MARKER}", or of a tool call's arguments shortened afterwards (marked "${ARG_MARKER}…]"; the call ran with the full value)`,
 		parameters: Type.Object({
 			entryId: Type.String({ description: "Entry id from the context-guard header" }),
 			pattern: Type.Optional(Type.String({ description: "JavaScript regex; return only matching lines" })),
@@ -490,14 +516,14 @@ function describe(config: GuardConfig, stats: GuardStats, problem: string | unde
 	const lines = [
 		`context-guard is ${config.enabled ? "on" : "off"}${problem && config.enabled ? ` (${problem})` : ""} · model ${config.model}`,
 		...(failure && config.enabled ? [`⚠ Jev is failing: ${failureWarning(failure, now)}`] : []),
-		`Saving ~${formatTokens(stats.savedTokens)} tokens (${formatChars(stats.savedChars)} chars): ${stats.distilledResults} distilled tool output(s), ${stats.imageResults} output(s) without their images, ${stats.omittedExchanges} omitted exchange(s).`,
+		`Saving ~${formatTokens(stats.savedTokens)} tokens (${formatChars(stats.savedChars)} chars): ${stats.distilledResults} distilled tool output(s), ${stats.imageResults} output(s) without their images, ${stats.argCalls} tool call(s) with long arguments shortened, ${stats.omittedExchanges} omitted exchange(s).`,
 		...(stats.compacted ? [`Σ ~${formatTokens(stats.lifetimeTokens)} tokens saved on this branch in total; a compaction has since dropped the earlier edits from context.`] : []),
 		`Jev: ${stats.runs - stats.checkpoints} run(s) and ${stats.checkpoints} mid-run checkpoint(s), ${stats.requests} request(s), ${formatCost(stats.costUsd)} on this branch.`,
-		`Mid-run checkpoints are ${config.midRun ? `on (outputs ≥ ${config.midRunMinAgeTurns} turns old, batches of ≥ ${formatChars(config.midRunBatchChars)} chars)` : "off"}; old exchanges are ${config.pruneExchanges ? `judged (all but the last ${config.keepRecentExchanges})` : "kept"}; tool-output images are ${config.imageKeepTurns > 0 ? `removed after ${config.imageKeepTurns} turns` : "kept"}.`,
+		`Mid-run checkpoints are ${config.midRun ? `on (outputs ≥ ${config.midRunMinAgeTurns} turns old, batches of ≥ ${formatChars(config.midRunBatchChars)} chars)` : "off"}; old exchanges are ${config.pruneExchanges ? `judged (all but the last ${config.keepRecentExchanges})` : "kept"}; tool-output images are ${config.imageKeepTurns > 0 ? `removed after ${config.imageKeepTurns} turns` : "kept"}; long tool-call arguments are ${config.argKeepTurns > 0 && config.argStubProviders.length > 0 ? `shortened after ${config.argKeepTurns} turns (${config.argStubProviders.join(", ")})` : "kept"}.`,
 	];
 	const last = stats.last;
 	if (last) {
-		const kinds = ["large", "small", "exchange", "image"].map((kind) => `${last.results.filter((r) => (r.kind ?? "large") === kind).length} ${kind}`).join(", ");
+		const kinds = ["large", "small", "exchange", "image", "args"].map((kind) => `${last.results.filter((r) => (r.kind ?? "large") === kind).length} ${kind}`).join(", ");
 		lines.push(`Last ${last.phase === "mid-run" ? "checkpoint" : "run"} (${(last.ms / 1000).toFixed(1)} s${last.timedOut ? ", timed out" : ""}; ${kinds}):`);
 		if (last.errors) lines.push(`  ${last.errors} of ${last.requests} Jev request(s) failed: ${last.error ?? "unknown error"}`);
 		for (const result of last.results) {

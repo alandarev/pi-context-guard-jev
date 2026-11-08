@@ -8,6 +8,7 @@
  *   earlier edits from the context, so after one the footer shows both (`🛡 0 · Σ−79k`);
  * - Jev usage: summed from the same records.
  */
+import { argsElided, elidedCalls } from "./args.ts";
 import { imagesRemoved } from "./images.ts";
 import { formatChars, MARKER } from "./render.ts";
 import { EXCHANGE_STUB_PREFIX } from "./items.ts";
@@ -35,7 +36,7 @@ export interface RunRecordData {
 	error?: string;
 	results: {
 		/** Absent in records that only had large outputs. */
-		kind?: "large" | "small" | "exchange" | "image";
+		kind?: "large" | "small" | "exchange" | "image" | "args";
 		/** Omitted exchanges: the entry ids that got `replacement: null`. */
 		omitted?: string[];
 		entryId: string;
@@ -55,6 +56,8 @@ export interface GuardStats {
 	distilledResults: number;
 	/** Tool results whose images are currently removed from model context. */
 	imageResults: number;
+	/** Tool calls whose long arguments are currently shortened in model context (args.ts). */
+	argCalls: number;
 	/** Old exchanges currently omitted from model context. */
 	omittedExchanges: number;
 	/** Characters currently kept out of model context. */
@@ -84,6 +87,7 @@ export function computeStats(projection: readonly ProjectedEntryLike[], branch: 
 	const stats: GuardStats = {
 		distilledResults: 0,
 		imageResults: 0,
+		argCalls: 0,
 		omittedExchanges: 0,
 		savedChars: 0,
 		savedTokens: 0,
@@ -111,6 +115,11 @@ export function computeStats(projection: readonly ProjectedEntryLike[], branch: 
 			}
 			stats.omittedExchanges++;
 			stats.savedChars += Math.max(0, before - messageChars(projected));
+			continue;
+		}
+		if (entry.messages.length === 1 && argsElided(projected, raw)) {
+			stats.argCalls += elidedCalls(projected);
+			stats.savedChars += Math.max(0, messageChars(raw!) - messageChars(projected));
 			continue;
 		}
 		if (entry.messages.length !== 1 || projected?.role !== "toolResult" || !raw) continue;
@@ -154,7 +163,7 @@ export function formatStatus(stats: GuardStats, state: StatusState, color: Color
 	// After a compaction dropped earlier edits: "· Σ−79k", every saving of the session so far.
 	const lifetime = stats.compacted && stats.lifetimeTokens > stats.savedTokens ? color("dim", ` · Σ−${formatTokens(stats.lifetimeTokens)}`) : "";
 	if (stats.savedTokens === 0) return `${color("dim", `${icon} ${lifetime ? "0" : "0 saved"}`)}${lifetime}`;
-	const count = stats.distilledResults + stats.imageResults + stats.omittedExchanges;
+	const count = stats.distilledResults + stats.imageResults + stats.argCalls + stats.omittedExchanges;
 	// "🛡 −4.2k · 1": ≈ tokens kept out of context · edited items.
 	return `${color("success", `${icon} −${formatTokens(stats.savedTokens)}`)}${color("dim", ` · ${count}`)}${lifetime}`;
 }

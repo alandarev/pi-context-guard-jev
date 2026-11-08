@@ -91,6 +91,18 @@ export interface GuardConfig {
 	 * result); `recall` shows them again. Images in user messages are always kept. 0 turns this off.
 	 */
 	imageKeepTurns: number;
+	/**
+	 * Shorten long arguments of tool calls once this many assistant messages have followed the call
+	 * (args.ts); `recall` shows the original call. 0 turns this off.
+	 */
+	argKeepTurns: number;
+	/** A string argument is shortened only if that removes at least this many characters. */
+	argMinChars: number;
+	/**
+	 * Providers (of the session's model) for which arguments are shortened. Claude (Haiku) took its
+	 * shortened calls for what it had sent and re-checked its files (docs/DESIGN.md → Arguments).
+	 */
+	argStubProviders: string[];
 }
 
 export const DEFAULT_CONFIG: GuardConfig = {
@@ -127,6 +139,9 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	runEndBreakEven: true,
 	exchangeMinSavingChars: 8_000,
 	imageKeepTurns: 3,
+	argKeepTurns: 4,
+	argMinChars: 2_000,
+	argStubProviders: ["openai-codex"],
 };
 
 const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
@@ -152,13 +167,15 @@ const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
 	exchangeOmitThreshold: [0, 1],
 	exchangeMinSavingChars: [0, 10_000_000],
 	imageKeepTurns: [0, 1_000],
+	argKeepTurns: [0, 1_000],
+	argMinChars: [200, 10_000_000],
 };
 
-const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges", "midRunMinAgeTurns", "midRunBatchChars", "midRunBatchCharsOpenAI", "smallResultMinChars", "keepRecentExchanges", "exchangeMinSavingChars", "imageKeepTurns"]);
+const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars", "timeoutMs", "concurrency", "maxSegmentChars", "maxChunksPerSegment", "historyExchanges", "midRunMinAgeTurns", "midRunBatchChars", "midRunBatchCharsOpenAI", "smallResultMinChars", "keepRecentExchanges", "exchangeMinSavingChars", "imageKeepTurns", "argKeepTurns", "argMinChars"]);
 
 /** Merge untrusted JSON over the defaults, keeping only well-typed, in-range values. */
 export function normalizeConfig(raw: unknown): GuardConfig {
-	const config: GuardConfig = { ...DEFAULT_CONFIG, excludeTools: [...DEFAULT_CONFIG.excludeTools] };
+	const config: GuardConfig = { ...DEFAULT_CONFIG, excludeTools: [...DEFAULT_CONFIG.excludeTools], argStubProviders: [...DEFAULT_CONFIG.argStubProviders] };
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return config;
 	const input = raw as Record<string, unknown>;
 	for (const key of Object.keys(DEFAULT_CONFIG) as (keyof GuardConfig)[]) {
@@ -175,6 +192,8 @@ export function normalizeConfig(raw: unknown): GuardConfig {
 			config.model = value.trim();
 		} else if (key === "excludeTools" && Array.isArray(value)) {
 			config.excludeTools = value.filter((name): name is string => typeof name === "string");
+		} else if (key === "argStubProviders" && Array.isArray(value)) {
+			config.argStubProviders = value.filter((name): name is string => typeof name === "string");
 		}
 	}
 	return config;

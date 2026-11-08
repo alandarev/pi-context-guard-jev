@@ -156,3 +156,12 @@ test("item settings: defaults and validation", () => {
 	const bad = normalizeConfig({ smallResultMinChars: 1.5, smallKeepThreshold: 2, pruneExchanges: "yes", keepRecentExchanges: -1, exchangeOmitThreshold: -0.1 });
 	assert.deepEqual([bad.smallResultMinChars, bad.smallKeepThreshold, bad.pruneExchanges, bad.keepRecentExchanges, bad.exchangeOmitThreshold], [400, 0.45, true, 2, 0.35]);
 });
+
+test("normalizeConfig validates the argument settings", () => {
+	const config = normalizeConfig({ argKeepTurns: 0, argMinChars: 500, argStubProviders: ["openai-codex", 3, "anthropic"] });
+	assert.deepEqual([config.argKeepTurns, config.argMinChars, config.argStubProviders], [0, 500, ["openai-codex", "anthropic"]]);
+	const bad = normalizeConfig({ argKeepTurns: 2.5, argMinChars: 10, argStubProviders: "anthropic" });
+	assert.deepEqual([bad.argKeepTurns, bad.argMinChars, bad.argStubProviders], [4, 2_000, ["openai-codex"]]);
+	bad.argStubProviders.push("x");
+	assert.deepEqual(DEFAULT_CONFIG.argStubProviders, ["openai-codex"]);
+});

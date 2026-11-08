@@ -65,6 +65,13 @@ export interface ContextEditDraft {
 	replacement: { content: { type: "text"; text: string }[] };
 }
 
+/** A context edit that replaces an assistant message's whole content (args.ts: shortened tool-call arguments). */
+export interface AssistantEditDraft {
+	type: "context_edit";
+	targetId: string;
+	replacement: { content: Block[] };
+}
+
 /** A context edit that omits its target from model context (`replacement: null`). */
 export interface OmitDraft {
 	type: "context_edit";

@@ -1,9 +1,11 @@
 /**
  * What the `recall` tool returns: the original tool output (with its images), optionally filtered by a
  * regex or limited to a line window, truncated like Pi's `read` tool; or an omitted exchange as a
- * transcript (images in its user messages attached, tool-result images named by their entry id).
+ * transcript (images in its user messages attached, tool-result images named by their entry id); or the
+ * original tool calls of an assistant message whose arguments were shortened (args.ts).
  */
 import vm from "node:vm";
+import { originalCalls } from "./args.ts";
 import { MARKER } from "./render.ts";
 import { isBranchSteering } from "./run.ts";
 import { type Block, type SourceEntryLike, textOf } from "./types.ts";
@@ -32,7 +34,8 @@ type RecallBranchEntry = { id?: string; type?: string; message?: { role?: string
 /**
  * The original text behind a context-guard stub: a tool result's output, or, for the user prompt of an
  * omitted exchange, the whole exchange from the branch (prompt, assistant texts, tool calls and results,
- * custom messages, steering messages) up to the next prompt.
+ * custom messages, steering messages) up to the next prompt; for an assistant message, its tool calls with
+ * their full arguments.
  */
 export function originalOutput(entry: SourceEntryLike | undefined, entryId: string, branch: readonly RecallBranchEntry[] = [], omittedIds?: readonly string[]): string {
 	return originalContent(entry, entryId, branch, omittedIds).text;
@@ -49,6 +52,7 @@ export function originalContent(
 ): { text: string; images: Block[] } {
 	const message = entry?.type === "message" ? entry.message : undefined;
 	if (message?.role === "toolResult") return { text: textOf(message), images: imagesOf(message.content) };
+	if (message?.role === "assistant" && Array.isArray(message.content) && message.content.some((b) => b.type === "toolCall")) return { text: originalCalls(message), images: [] };
 	if (message?.role === "user") {
 		const start = branch.findIndex((e) => e.id === entryId);
 		if (start >= 0) {

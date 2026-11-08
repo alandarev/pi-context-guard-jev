@@ -18,16 +18,16 @@ If the model or credential is missing, the extension does nothing and the status
 | `🛡 0 saved` | On and ready; nothing is distilled on this branch yet |
 | `🛡 0 · Σ−79k` | A compaction dropped the earlier edits from context: nothing is kept out right now, about 79k tokens were saved on this branch in total |
 | `🛡 distilling…` | Jev is judging the outputs of the run that just finished, or of a mid-run checkpoint |
-| `🛡 −4.2k · 1` | ≈ tokens kept out of context · items: about 4.2k tokens are currently kept out of context, by 1 distilled or omitted tool output, output without its images, or old exchange |
+| `🛡 −4.2k · 1` | ≈ tokens kept out of context · items: about 4.2k tokens are currently kept out of context, by 1 distilled or omitted tool output, output without its images, tool call with shortened arguments, or old exchange |
 | `🛡 −4.2k · 1 · Σ−83k` | The same, after a compaction: Σ is the total saved on this branch, including edits the compaction dropped |
 | `🛡 guard off` | Turned off with `/guard off` or `"enabled": false` |
 | `🛡 no openrouter key` | No credential for the classifier's provider (the provider name is filled in) |
 | `🛡 Jev model not found` | The configured `model` is not in Pi's classifier catalog |
-| `🛡 Jev failing: 402 insufficient credits` | Every Jev request of the last pass failed, so nothing is distilled (old images are still removed). The text is the HTTP status and the provider's message; a warning shows the full error once, and `/guard status` repeats it. After a 401, 402 or 403 Jev requests are paused for 5 minutes (`/guard reload` retries at once). The first request that succeeds clears it. After a restart it is read from the last record on the branch |
+| `🛡 Jev failing: 402 insufficient credits` | Every Jev request of the last pass failed, so nothing is distilled (old images are still removed and old arguments shortened). The text is the HTTP status and the provider's message; a warning shows the full error once, and `/guard status` repeats it. After a 401, 402 or 403 Jev requests are paused for 5 minutes (`/guard reload` retries at once). The first request that succeeds clears it. After a restart it is read from the last record on the branch |
 
 The token figure is Pi's usual estimate, characters ÷ 4. It counts what is kept out of the model's context
 **on the current branch right now**: original size minus replacement size, for every distilled output,
-removed image and omitted exchange that is still in the context (an image counts as about width × height ÷ 750
+removed image, shortened tool-call argument and omitted exchange that is still in the context (an image counts as about width × height ÷ 750
 tokens). It goes down after `/tree` to a point before an edit, and after compaction removes distilled
 results; then Σ shows the total of every pass on the branch so far. It is not a measured token count.
 
@@ -35,7 +35,7 @@ results; then Σ shows the total of every pass on the branch so far. It is not a
 
 | Command | Effect |
 |---|---|
-| `/guard` or `/guard status` | Shows whether the guard is on, the model, the savings on this branch (distilled outputs and omitted exchanges), Jev runs and mid-run checkpoints, requests and cost, whether checkpoints and exchange pruning are on, and the last run's or checkpoint's result for each item (large, small, exchange), including Jev traces such as `kw.15 focus=chunk_4:.52 keep 9/29` or `p.06` |
+| `/guard` or `/guard status` | Shows whether the guard is on, the model, the savings on this branch (distilled outputs, outputs without their images, tool calls with shortened arguments, omitted exchanges), Jev runs and mid-run checkpoints, requests and cost, whether checkpoints, exchange pruning, image removal and argument shortening are on, and the last run's or checkpoint's result for each item (large, small, exchange, image, args), including Jev traces such as `kw.15 focus=chunk_4:.52 keep 9/29` or `p.06` |
 | `/guard on` / `/guard off` | Turns the guard on or off and saves `enabled` to the settings file |
 | `/guard reload` | Re-reads the settings file, shows any warnings again, and ends a Jev failure pause (the next pass tries Jev again) |
 
@@ -94,9 +94,12 @@ fall back to the default.
 | `keepRecentExchanges` | `2` | The last this many exchanges before the current prompt are never omitted |
 | `exchangeOmitThreshold` | `0.35` | Omit an exchange only if P(still relevant) is below this (probe in [JEV.md](JEV.md); raised from 0.2 after a replay of real sessions) |
 | `exchangeBreakEven` | `true` | At run end, omit unrelated exchanges only when the cache rewrite they cause pays off; deferred ones are judged again at later run ends and omitted once their total pays off. `false` always omits them |
-| `runEndBreakEven` | `true` | At run end, apply the run's own edits (distilled outputs, its image removals) only when their cache rewrite pays off over as many later requests as the session has had so far; otherwise the outputs stay as they are (reason `no-payoff`). `false` always applies them |
+| `runEndBreakEven` | `true` | At run end, apply the run's own edits (distilled outputs, its image removals and shortened arguments) only when their cache rewrite pays off over as many later requests as the session has had so far; otherwise the outputs stay as they are (reason `no-payoff`). `false` always applies them |
 | `exchangeMinSavingChars` | `8000` | A run end omits exchanges only if they save at least this many characters together (when they cost a cache rewrite) |
 | `imageKeepTurns` | `3` | Remove images from tool results once this many assistant messages have followed them (`recall` shows them again); images in user messages are kept; `0` turns this off |
+| `argKeepTurns` | `4` | Shorten long arguments of tool calls once this many assistant messages have followed the call: the head and tail of each long string stay, with one `[context-guard: … omitted here afterwards …]` line between them (`recall` with the assistant entry id shows the call); `0` turns this off |
+| `argMinChars` | `2000` | Shorten a string argument only if that removes at least this many characters (200–10,000,000) |
+| `argStubProviders` | `["openai-codex"]` | Model providers whose sessions get shortened arguments. Off for `anthropic` by default: in live probes Claude Haiku took the marker line for something it had written, re-checked its files and reported a problem to the user ([DESIGN.md](DESIGN.md#items-what-one-pass-judges)) |
 
 Example:
 
@@ -124,7 +127,7 @@ each Jev request sends the following to OpenRouter, which forwards it to TypeSaf
   size. Set `pruneExchanges` to `false` to send none of it.
 
 Never sent: tool outputs below `smallResultMinChars` (400 characters), results of excluded tools (`edit`,
-`write`), images (never sent: they are removed by age), the text of outputs with images, old exchanges with entries another extension changed,
+`write`), images (never sent: they are removed by age), the tool-call arguments that get shortened (never sent: they are shortened by age), the text of outputs with images, old exchanges with entries another extension changed,
 exchanges below 2,000 characters, and the last `keepRecentExchanges` (2) exchanges before the current
 prompt. Large outputs are sent only when the run's large outputs add up to `minRunChars` (8,000); small
 outputs and old exchanges are sent at every run end and every mid-run checkpoint that has any.
@@ -135,7 +138,7 @@ sessions. See OpenRouter's data policy:
 
 ## What it never touches
 
-- messages of the current run other than tool results, and the last `keepRecentExchanges` exchanges before
+- messages of the current run other than tool results (and long arguments of its old tool calls), and the last `keepRecentExchanges` exchanges before
   the current prompt
 - compaction and branch summaries, exchanges that did not finish (the last reply has tool calls), and
   messages Pi cannot edit (system messages, `!` shell executions), which stay in place inside an omitted
@@ -149,7 +152,11 @@ sessions. See OpenRouter's data policy:
 - results that are already distilled, or that another extension already edited
 - single lines too long for one Jev request (kept as they are)
 - tool outputs of earlier runs one by one: earlier runs are only touched as whole exchanges (and their old
-  images)
+  images and arguments)
+- tool-call arguments younger than `argKeepTurns` (4) turns or shorter than `argMinChars`, calls that
+  failed or have no result, `recall` calls, assistant messages another extension changed, and arguments in
+  sessions whose provider is not in `argStubProviders` (Anthropic by default); text and thinking of
+  assistant messages are never changed
 
 ## Limitations
 

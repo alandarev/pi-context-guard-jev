@@ -20,10 +20,11 @@ import {
 	smallStub,
 	type WorkContext,
 } from "./items.ts";
+import { type ArgsItem, argsLabel } from "./args.ts";
 import { type ImageItem, imageLabel } from "./images.ts";
 import { toolLabel } from "./render.ts";
 import type { RunInfo } from "./run.ts";
-import type { ClassifyFn, ContextEditDraft, OmitDraft } from "./types.ts";
+import type { AssistantEditDraft, ClassifyFn, ContextEditDraft, OmitDraft } from "./types.ts";
 
 export interface ProcessOptions extends DistillOptions {
 	/** Keep a small output when P(still needed) reaches this. */
@@ -39,7 +40,7 @@ export interface ItemRecord extends ResultRecord {
 }
 
 export interface ProcessOutcome {
-	edits: (ContextEditDraft | OmitDraft)[];
+	edits: (ContextEditDraft | AssistantEditDraft | OmitDraft)[];
 	records: ItemRecord[];
 	savedChars: number;
 	requests: number;
@@ -182,15 +183,28 @@ export const emptyOutcome = (): ProcessOutcome => ({ edits: [], records: [], sav
  * after a distillation would undo it. Skipped images stay eligible for a later pass.
  */
 export function addImages(outcome: ProcessOutcome, items: readonly ImageItem[]): void {
+	addRuleEdits(outcome, items, "image", imageLabel);
+}
+
+/**
+ * Add the shortening of old tool-call arguments (no Jev request; args.ts) to `outcome`, with the same rule
+ * as images: assistant messages the outcome already edits (an exchange omission) are skipped, so the
+ * omission wins and the message stays eligible for a later pass.
+ */
+export function addArgs(outcome: ProcessOutcome, items: readonly ArgsItem[]): void {
+	addRuleEdits(outcome, items, "args", argsLabel);
+}
+
+function addRuleEdits<T extends ImageItem | ArgsItem>(outcome: ProcessOutcome, items: readonly T[], kind: "image" | "args", label: (item: T) => string): void {
 	const edited = new Set(outcome.edits.map((e) => e.targetId));
 	for (const item of items) {
 		if (edited.has(item.entryId)) continue;
 		outcome.edits.push({ type: "context_edit", targetId: item.entryId, replacement: { content: item.replacement } });
 		outcome.records.push({
-			kind: "image",
+			kind,
 			entryId: item.entryId,
 			tool: item.toolName,
-			label: imageLabel(item),
+			label: label(item),
 			outcome: "removed",
 			reason: `${item.age} turns old`,
 			beforeChars: item.beforeChars,
@@ -205,21 +219,37 @@ export function addImages(outcome: ProcessOutcome, items: readonly ImageItem[]):
 	}
 }
 
-/** Take image removals for `ids` back out of `outcome` (they stay eligible for a later pass). */
-export function dropImages(outcome: ProcessOutcome, ids: ReadonlySet<string>): void {
-	if (ids.size === 0) return;
-	outcome.edits = outcome.edits.filter((e) => !ids.has(e.targetId));
+/**
+ * Take image and argument edits for `ids` back out of `outcome` (they stay eligible for a later pass).
+ * Other edits of those entries (an exchange omission that won over them, see `addImages`) stay.
+ */
+export function dropRuleEdits(outcome: ProcessOutcome, ids: ReadonlySet<string>): void {
+	const dropped = new Set(ruleEdits(outcome, ids).ids);
+	if (dropped.size === 0) return;
+	outcome.edits = outcome.edits.filter((e) => !dropped.has(e.targetId));
 	outcome.records = outcome.records.filter((r) => {
-		if (r.kind !== "image" || !ids.has(r.entryId)) return true;
+		if ((r.kind !== "image" && r.kind !== "args") || !dropped.has(r.entryId)) return true;
 		outcome.savedChars -= r.beforeChars - r.afterChars;
 		return false;
 	});
 }
 
+/** The image and argument edits of `outcome` among `ids`: their entry ids and net characters. */
+export function ruleEdits(outcome: ProcessOutcome, ids: ReadonlySet<string>): { savedChars: number; ids: Set<string> } {
+	const found = new Set<string>();
+	let savedChars = 0;
+	for (const r of outcome.records) {
+		if ((r.kind !== "image" && r.kind !== "args") || !ids.has(r.entryId)) continue;
+		found.add(r.entryId);
+		savedChars += r.beforeChars - r.afterChars;
+	}
+	return { savedChars, ids: found };
+}
+
 /**
- * Take the edits of `ids` (distilled or removed outputs, image removals) back out of `outcome`: the
- * run-end break-even gate found that their cache rewrite does not pay off. Their records say `kept` with
- * reason `no-payoff`; image records are dropped (the image stays and is collected again next time).
+ * Take the edits of `ids` (distilled or removed outputs, image and argument edits) back out of `outcome`:
+ * the run-end break-even gate found that their cache rewrite does not pay off. Their records say `kept`
+ * with reason `no-payoff`; image and argument records are dropped (collected again next time).
  */
 export function dropOutputs(outcome: ProcessOutcome, ids: ReadonlySet<string>): void {
 	if (ids.size === 0) return;
@@ -227,7 +257,7 @@ export function dropOutputs(outcome: ProcessOutcome, ids: ReadonlySet<string>): 
 	outcome.records = outcome.records.filter((r) => {
 		if (!ids.has(r.entryId) || r.outcome === "kept" || r.kind === "exchange") return true;
 		outcome.savedChars -= r.beforeChars - r.afterChars;
-		if (r.kind === "image") return false;
+		if (r.kind === "image" || r.kind === "args") return false;
 		r.outcome = "kept";
 		r.reason = "no-payoff";
 		r.afterChars = r.beforeChars;
@@ -235,12 +265,12 @@ export function dropOutputs(outcome: ProcessOutcome, ids: ReadonlySet<string>): 
 	});
 }
 
-/** Entry ids and net characters of the outcome's output edits (large, small, and images in `imageIds`). */
-export function outputEdits(outcome: ProcessOutcome, imageIds: ReadonlySet<string>): { savedChars: number; ids: Set<string> } {
+/** Entry ids and net characters of the outcome's output edits (large, small, and image or argument edits in `ruleIds`). */
+export function outputEdits(outcome: ProcessOutcome, ruleIds: ReadonlySet<string>): { savedChars: number; ids: Set<string> } {
 	const ids = new Set<string>();
 	let savedChars = 0;
 	for (const r of outcome.records) {
-		if (r.outcome === "kept" || r.kind === "exchange" || (r.kind === "image" && !imageIds.has(r.entryId))) continue;
+		if (r.outcome === "kept" || r.kind === "exchange" || ((r.kind === "image" || r.kind === "args") && !ruleIds.has(r.entryId))) continue;
 		ids.add(r.entryId);
 		savedChars += r.beforeChars - r.afterChars;
 	}

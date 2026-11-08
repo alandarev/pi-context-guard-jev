@@ -1029,3 +1029,124 @@ test("recall of an omitted exchange attaches user images and names tool-result i
 		["## user", "like this", "[1 image(s), attached below]", "## assistant", "[tool call] screenshot {}", "## tool result (screenshot)", "captured", '[1 image(s): recall({"entryId":"r1"}) shows them]', "## assistant", "matches"].join("\n"),
 	);
 });
+
+/** A run of `turns` write calls of ~4k chars each (each answered "ok"), optionally with a final answer. */
+const writeRun = (turns: number, done: boolean, prefix = "w") => {
+	const out: ReturnType<typeof user>[] = [user("Write the pages", `${prefix}u`)];
+	for (let t = 0; t < turns; t++) {
+		out.push(assistant("", [{ id: `${prefix}c${t}`, name: "write", arguments: { path: `page${t}.html`, content: lines(100, `page ${t}`, 40) } }], `${prefix}a${t}`));
+		out.push(toolResult(`${prefix}c${t}`, "write", "ok", `${prefix}r${t}`));
+	}
+	if (done) out.push(assistant("All pages written.", [], `${prefix}done`));
+	return out;
+};
+const codexModel = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-5.6-luna" };
+
+test("agent_before_settle: long arguments of old calls are shortened without Jev (OpenAI Codex only); recall shows the call", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
+	const session = fakeSession(writeRun(6, true) as never);
+	const { ctx, calls } = sessionCtx(session);
+	ctx.modelRegistry.findOfType = (() => undefined) as never;
+	await handler("session_start")({ type: "session_start" }, ctx);
+	// Claude: argStubProviders leaves it out.
+	assert.equal(await settle(session, { ...ctx, model: anthropicModel }), undefined);
+	Object.assign(ctx, { model: codexModel });
+	const result = (await settle(session, ctx)) as { entries: Json[] };
+	assert.equal(calls.length, 0);
+	// wa0–wa2 have 4+ assistant messages after them.
+	assert.deepEqual(editTargets(result), ["wa0", "wa1", "wa2"]);
+	const record = result.entries.at(-1)!.data;
+	assert.deepEqual(
+		record.results.map((r: Json) => [r.kind, r.entryId, r.outcome, r.reason, r.label]),
+		[
+			["args", "wa0", "removed", "6 turns old", "write page0.html (1 arg)"],
+			["args", "wa1", "removed", "5 turns old", "write page1.html (1 arg)"],
+			["args", "wa2", "removed", "4 turns old", "write page2.html (1 arg)"],
+		],
+	);
+	const edit = result.entries.find((e) => e.type === "context_edit")!;
+	assert.deepEqual(
+		edit.replacement.content.map((b: Json) => [b.type, b.id, b.name, b.arguments.path]),
+		[["toolCall", "wc0", "write", "page0.html"]],
+	);
+	session.commit(result.entries);
+	const status = (await import("../../src/stats.ts")).computeStats(session.projection() as never, session.branch as never);
+	assert.equal(status.argCalls, 3);
+
+	const tool = extension.tools.get("recall")!.definition;
+	const recallCtx = { sessionManager: { getEntry: (id: string) => session.branch.find((e) => e.id === id), getBranch: () => session.branch } };
+	const recalled = (await tool.execute("call", { entryId: "wa0" }, undefined, undefined, recallCtx)) as { content: Json[] };
+	assert.equal(recalled.content[0].text, `[tool call] write\n--- path ---\npage0.html\n--- content ---\n${lines(100, "page 0", 40)}`);
+	// Nothing new at the next settle.
+	assert.equal(await settle(session, ctx), undefined);
+	// Off with argKeepTurns 0.
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, argKeepTurns: 0 }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.equal(await settle(fakeSession(writeRun(6, true) as never), ctx), undefined);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
+});
+
+test("turn_end: old long arguments fill a checkpoint batch on their own, under the break-even rule", async () => {
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
+	// 12 turns: 8 calls (~25k chars saved) are below the batch size.
+	const short = fakeSession(writeRun(12, false) as never);
+	const first = sessionCtx(short);
+	Object.assign(first.ctx, { model: codexModel });
+	await handler("session_start")({ type: "session_start" }, first.ctx);
+	assert.equal(await handler("turn_end")(turnEndOf(short), first.ctx), undefined);
+	// 24 turns: 20 calls (~62k chars) pay off against the whole context.
+	const long = fakeSession(writeRun(24, false) as never);
+	const { ctx, calls } = sessionCtx(long);
+	Object.assign(ctx, { model: codexModel });
+	const result = (await handler("turn_end")(turnEndOf(long), ctx)) as { entries: Json[] };
+	assert.equal(calls.length, 0);
+	assert.equal(editTargets(result).length, 20);
+	assert.equal(result.entries.at(-1)!.data.phase, "mid-run");
+	assert.ok(result.entries.at(-1)!.data.results.every((r: Json) => r.kind === "args"));
+});
+
+test("turn_end: long arguments from before the last user message are the first tier dropped", async () => {
+	// A provider that rewrites from the earliest edit: an earlier run's call moves the rewrite back over
+	// its ~240k chars of outputs, which its ~3k-char saving does not pay for; the current run's calls do.
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pruneExchanges: false, argStubProviders: ["other"] }));
+	const earlier = [...writeRun(1, false, "p")];
+	for (let t = 0; t < 30; t++) {
+		earlier.push(assistant("", [{ id: `pb${t}`, name: "bash", arguments: { command: `cat log${t}` } }], `pba${t}`));
+		earlier.push(toolResult(`pb${t}`, "bash", lines(200, `log ${t}`, 40), `pbr${t}`));
+	}
+	earlier.push(assistant("Done.", [], "pdone"));
+	const session = fakeSession([...earlier, ...writeRun(30, false)] as never);
+	const { ctx } = sessionCtx(session);
+	Object.assign(ctx, { model: { api: "openai-completions", provider: "other", id: "m" } });
+	await handler("session_start")({ type: "session_start" }, ctx);
+	const result = (await handler("turn_end")(turnEndOf(session), ctx)) as { entries: Json[] };
+	const targets = editTargets(result);
+	assert.equal(targets.length, 26);
+	assert.ok(targets.every((id) => id.startsWith("wa")));
+	// Without the break-even rule the earlier call comes along.
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pruneExchanges: false, argStubProviders: ["other"], midRunBreakEven: false }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.equal(editTargets(await handler("turn_end")(turnEndOf(session), ctx))[0], "pa0");
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
+});
+
+test("agent_before_settle: a run's own long arguments join its own edits, earlier ones the early gate", async () => {
+	// Own: 3 shortened calls in a 7-request session do not pay off against the whole context (Codex).
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	const own = fakeSession(writeRun(6, true) as never);
+	const first = sessionCtx(own);
+	Object.assign(first.ctx, { model: codexModel });
+	await handler("session_start")({ type: "session_start" }, first.ctx);
+	assert.equal(await settle(own, first.ctx), undefined);
+	// Early: calls of an earlier run go through the early gate (exchangeBreakEven), not runEndBreakEven.
+	const session = fakeSession([...writeRun(6, true, "p"), user("Thanks, check it", "cu"), assistant("Looks good.", [], "cd")] as never);
+	const { ctx } = sessionCtx(session);
+	Object.assign(ctx, { model: codexModel });
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pruneExchanges: false }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.equal(await settle(session, ctx), undefined);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: true, exchangeBreakEven: false, pruneExchanges: false }));
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.deepEqual(editTargets(await settle(session, ctx)), ["pa0", "pa1", "pa2", "pa3"]);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
+});

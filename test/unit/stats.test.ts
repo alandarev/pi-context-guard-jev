@@ -52,6 +52,7 @@ const identity: Colorize = (_color, text) => text;
 const empty: GuardStats = {
 	distilledResults: 0,
 	imageResults: 0,
+	argCalls: 0,
 	omittedExchanges: 0,
 	savedChars: 0,
 	savedTokens: 0,

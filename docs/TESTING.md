@@ -156,6 +156,14 @@ test/e2e/omit-probe.ts` omits the session's first exchange after turn 2 the way 
 sends a stub user message right before the next user message, without the omitted assistant and
 tool-result messages. Both GPT-6 Luna and Claude Sonnet 5.5 (`pi-claude-auth`) accepted it and answered.
 
+**Shortened arguments probe.** `node test/e2e/args-probe-run.mjs --model … [--ext …] [--keep 4] [--earlier]`
+runs one prompt (three `write` calls, then four `bash` checks) in a temp directory with
+`test/e2e/args-probe.ts`, which shortens long arguments of earlier assistant messages of the run at every
+turn boundary with `args.ts → elideString` (`--earlier`: a second prompt, shortening only messages of the
+first run). It prints each assistant message, the edits, provider errors and repeated writes; read the
+model's text and thinking in the printed session file for confusion about the marker line. Results
+(2026-11-08) are in [DESIGN.md](DESIGN.md#items-what-one-pass-judges) (old tool-call arguments).
+
 **Old images, live** (2026-10-08, Claude Sonnet 5.5 with `pi-claude-auth`, ad-hoc): six 1200×800 PNGs read
 one per message, then a follow-up about the second one. Run end removed the four images 3–6 turns old with
 no Jev request (record `requests: 0`, 19.9k chars ≈ 5k tokens); the next request carried 2 images instead
