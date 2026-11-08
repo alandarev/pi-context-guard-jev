@@ -1,0 +1,408 @@
+{
+ "description": "Aggregates of one heavy user's real Pi sessions with pi-context-guard-jev 0.3.x, while the Jev classifier was working. Counterfactual = the same sessions without the guard's edits. Dollar figures are estimates priced with each request's own cache prices; the cache-rewrite penalty is the extra uncached input after an edit beyond what requests without an edit show at the same idle gap.",
+ "period": {
+  "from": "2026-10-06",
+  "to": "2026-10-27"
+ },
+ "methodology": "test/analysis (extract.py, cost.py, real-usage.py)",
+ "total": {
+  "sessions": 1138,
+  "requests": 154045,
+  "contextTokensProcessed": 32523783220,
+  "contextTokensKeptOut": 10826354533,
+  "contextReductionPct": 25.0,
+  "mainModelSpendUsd": 15459,
+  "cheaperContextUsd": 3175,
+  "cacheRewritePenaltyUsd": 2210,
+  "jevCostUsd": 17.99,
+  "netSavingUsd": 948,
+  "netSavingPct": 5.8
+ },
+ "byProvider": {
+  "anthropic": {
+   "sessions": 512,
+   "requests": 90717,
+   "contextTokensProcessed": 20067957680,
+   "contextTokensKeptOut": 7220456142,
+   "contextReductionPct": 26.5,
+   "mainModelSpendUsd": 10687,
+   "cheaperContextUsd": 2391,
+   "cacheRewritePenaltyUsd": 1694,
+   "jevCostUsd": 7.22,
+   "netSavingUsd": 690,
+   "netSavingPct": 6.1
+  },
+  "openai-codex": {
+   "sessions": 625,
+   "requests": 63315,
+   "contextTokensProcessed": 12455097482,
+   "contextTokensKeptOut": 3605898391,
+   "contextReductionPct": 22.5,
+   "mainModelSpendUsd": 4772,
+   "cheaperContextUsd": 784,
+   "cacheRewritePenaltyUsd": 516,
+   "jevCostUsd": 10.76,
+   "netSavingUsd": 257,
+   "netSavingPct": 5.1
+  }
+ },
+ "bySessionLength": {
+  "<50 requests": {
+   "sessions": 580,
+   "requests": 12989,
+   "contextTokensProcessed": 1042938637,
+   "contextTokensKeptOut": 191894631,
+   "contextReductionPct": 15.5,
+   "mainModelSpendUsd": 691,
+   "cheaperContextUsd": 45,
+   "cacheRewritePenaltyUsd": 52,
+   "jevCostUsd": 4.92,
+   "netSavingUsd": -12,
+   "netSavingPct": -1.7
+  },
+  "50-199 requests": {
+   "sessions": 365,
+   "requests": 39305,
+   "contextTokensProcessed": 5197023137,
+   "contextTokensKeptOut": 1512405031,
+   "contextReductionPct": 22.5,
+   "mainModelSpendUsd": 2523,
+   "cheaperContextUsd": 333,
+   "cacheRewritePenaltyUsd": 300,
+   "jevCostUsd": 4.91,
+   "netSavingUsd": 28,
+   "netSavingPct": 1.1
+  },
+  "200+ requests": {
+   "sessions": 193,
+   "requests": 101751,
+   "contextTokensProcessed": 26283821446,
+   "contextTokensKeptOut": 9122054871,
+   "contextReductionPct": 25.8,
+   "mainModelSpendUsd": 12244,
+   "cheaperContextUsd": 2797,
+   "cacheRewritePenaltyUsd": 1858,
+   "jevCostUsd": 8.16,
+   "netSavingUsd": 931,
+   "netSavingPct": 7.1
+  }
+ },
+ "byRole": {
+  "main sessions": {
+   "sessions": 273,
+   "requests": 63944,
+   "contextTokensProcessed": 15701428312,
+   "contextTokensKeptOut": 4268399400,
+   "contextReductionPct": 21.4,
+   "mainModelSpendUsd": 8797,
+   "cheaperContextUsd": 1713,
+   "cacheRewritePenaltyUsd": 1512,
+   "jevCostUsd": 5.44,
+   "netSavingUsd": 196,
+   "netSavingPct": 2.2
+  },
+  "subagents": {
+   "sessions": 865,
+   "requests": 90101,
+   "contextTokensProcessed": 16822354908,
+   "contextTokensKeptOut": 6557955133,
+   "contextReductionPct": 28.0,
+   "mainModelSpendUsd": 6662,
+   "cheaperContextUsd": 1462,
+   "cacheRewritePenaltyUsd": 698,
+   "jevCostUsd": 12.55,
+   "netSavingUsd": 752,
+   "netSavingPct": 10.1
+  }
+ },
+ "itemsEdited": {
+  "large tool outputs (distilled)": {
+   "items": 24618,
+   "charsRemoved": 268007132,
+   "recalledPct": 4.0
+  },
+  "small tool outputs (omitted)": {
+   "items": 31486,
+   "charsRemoved": 40381849,
+   "recalledPct": 1.9
+  },
+  "old exchanges (omitted)": {
+   "items": 566,
+   "charsRemoved": 43637688,
+   "recalledPct": 1.2
+  },
+  "old screenshots (removed)": {
+   "items": 3335,
+   "charsRemoved": 20739778,
+   "recalledPct": 3.4
+  }
+ },
+ "contextCurve200plus": {
+  "note": "Mean context tokens per request, sessions with 200+ requests and no compaction, bucketed by 10 requests",
+  "sessions": 127,
+  "points": [
+   {
+    "request": 0,
+    "withGuard": 64308,
+    "withoutGuard": 64347,
+    "n": 1270
+   },
+   {
+    "request": 10,
+    "withGuard": 100261,
+    "withoutGuard": 103479,
+    "n": 1270
+   },
+   {
+    "request": 20,
+    "withGuard": 99067,
+    "withoutGuard": 119633,
+    "n": 1270
+   },
+   {
+    "request": 30,
+    "withGuard": 112315,
+    "withoutGuard": 138578,
+    "n": 1270
+   },
+   {
+    "request": 40,
+    "withGuard": 125250,
+    "withoutGuard": 156225,
+    "n": 1270
+   },
+   {
+    "request": 50,
+    "withGuard": 132390,
+    "withoutGuard": 169164,
+    "n": 1270
+   },
+   {
+    "request": 60,
+    "withGuard": 140607,
+    "withoutGuard": 182362,
+    "n": 1270
+   },
+   {
+    "request": 70,
+    "withGuard": 151178,
+    "withoutGuard": 197700,
+    "n": 1270
+   },
+   {
+    "request": 80,
+    "withGuard": 159533,
+    "withoutGuard": 210531,
+    "n": 1270
+   },
+   {
+    "request": 90,
+    "withGuard": 167284,
+    "withoutGuard": 222885,
+    "n": 1270
+   },
+   {
+    "request": 100,
+    "withGuard": 176515,
+    "withoutGuard": 235375,
+    "n": 1270
+   },
+   {
+    "request": 110,
+    "withGuard": 186398,
+    "withoutGuard": 249072,
+    "n": 1270
+   },
+   {
+    "request": 120,
+    "withGuard": 193071,
+    "withoutGuard": 260988,
+    "n": 1270
+   },
+   {
+    "request": 130,
+    "withGuard": 202588,
+    "withoutGuard": 273330,
+    "n": 1270
+   },
+   {
+    "request": 140,
+    "withGuard": 207908,
+    "withoutGuard": 283070,
+    "n": 1270
+   },
+   {
+    "request": 150,
+    "withGuard": 218281,
+    "withoutGuard": 296404,
+    "n": 1270
+   },
+   {
+    "request": 160,
+    "withGuard": 228613,
+    "withoutGuard": 311187,
+    "n": 1270
+   },
+   {
+    "request": 170,
+    "withGuard": 235611,
+    "withoutGuard": 323747,
+    "n": 1270
+   },
+   {
+    "request": 180,
+    "withGuard": 241358,
+    "withoutGuard": 333282,
+    "n": 1270
+   },
+   {
+    "request": 190,
+    "withGuard": 251149,
+    "withoutGuard": 347475,
+    "n": 1270
+   },
+   {
+    "request": 200,
+    "withGuard": 260077,
+    "withoutGuard": 360926,
+    "n": 1195
+   },
+   {
+    "request": 210,
+    "withGuard": 264675,
+    "withoutGuard": 369841,
+    "n": 1055
+   },
+   {
+    "request": 220,
+    "withGuard": 275565,
+    "withoutGuard": 386647,
+    "n": 961
+   },
+   {
+    "request": 230,
+    "withGuard": 278202,
+    "withoutGuard": 398378,
+    "n": 904
+   },
+   {
+    "request": 240,
+    "withGuard": 288821,
+    "withoutGuard": 400007,
+    "n": 831
+   },
+   {
+    "request": 250,
+    "withGuard": 295543,
+    "withoutGuard": 414817,
+    "n": 734
+   },
+   {
+    "request": 260,
+    "withGuard": 299484,
+    "withoutGuard": 426742,
+    "n": 656
+   },
+   {
+    "request": 270,
+    "withGuard": 305048,
+    "withoutGuard": 438300,
+    "n": 603
+   },
+   {
+    "request": 280,
+    "withGuard": 317405,
+    "withoutGuard": 453660,
+    "n": 557
+   },
+   {
+    "request": 290,
+    "withGuard": 327293,
+    "withoutGuard": 464760,
+    "n": 517
+   },
+   {
+    "request": 300,
+    "withGuard": 334963,
+    "withoutGuard": 471691,
+    "n": 491
+   },
+   {
+    "request": 310,
+    "withGuard": 338059,
+    "withoutGuard": 479832,
+    "n": 470
+   },
+   {
+    "request": 320,
+    "withGuard": 343150,
+    "withoutGuard": 488587,
+    "n": 433
+   },
+   {
+    "request": 330,
+    "withGuard": 362552,
+    "withoutGuard": 506673,
+    "n": 404
+   },
+   {
+    "request": 340,
+    "withGuard": 372628,
+    "withoutGuard": 517085,
+    "n": 389
+   },
+   {
+    "request": 350,
+    "withGuard": 383908,
+    "withoutGuard": 529832,
+    "n": 380
+   },
+   {
+    "request": 360,
+    "withGuard": 389456,
+    "withoutGuard": 540698,
+    "n": 377
+   },
+   {
+    "request": 370,
+    "withGuard": 399498,
+    "withoutGuard": 554555,
+    "n": 362
+   },
+   {
+    "request": 380,
+    "withGuard": 397448,
+    "withoutGuard": 565239,
+    "n": 343
+   },
+   {
+    "request": 390,
+    "withGuard": 403560,
+    "withoutGuard": 579843,
+    "n": 310
+   },
+   {
+    "request": 400,
+    "withGuard": 417998,
+    "withoutGuard": 601330,
+    "n": 300
+   }
+  ]
+ },
+ "contextComposition": {
+  "tool result: 4k-20k": 25.2,
+  "tool result: 20k+": 18.5,
+  "tool result: 400-4k": 13.0,
+  "call args: other": 12.3,
+  "summaries": 8.8,
+  "call args: edit/write": 6.7,
+  "thinking text": 6.5,
+  "images (tool results)": 2.9,
+  "assistant text": 1.8,
+  "custom messages": 1.6,
+  "tool result: recall": 1.0,
+  "user": 0.7,
+  "tool result: <400": 0.7,
+  "tool result: edit/write": 0.2
+ }
+}

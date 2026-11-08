@@ -1,9 +1,53 @@
 # Measured results
 
+## Real usage (October 2026)
+
+2026-10-06 to 2026-10-27: every Pi session of one heavy user (main sessions and
+subagents; Claude and GPT models) while the Jev classifier was working, with
+pi-context-guard-jev 0.3.x at default settings. Aggregates only: [data/real-usage.json](data/real-usage.json).
+Scripts: [`test/analysis/`](../test/analysis) (`extract.py`, `cost.py`, `real-usage.py`, `charts.py`).
+
+| Group | Sessions | Requests | Context tokens | Model spend | Cheaper context | Cache rewrites | Jev | Net (estimated) |
+|---|---|---|---|---|---|---|---|---|
+| **all** | 1,138 | 154,045 | −25.0% | $15,459 | $3,175 | $2,210 | $17.99 | +$948 (+5.8%) |
+| anthropic | 512 | 90,717 | −26.5% | $10,687 | $2,391 | $1,694 | $7.22 | +$690 (+6.1%) |
+| openai-codex | 625 | 63,315 | −22.5% | $4,772 | $784 | $516 | $10.76 | +$257 (+5.1%) |
+| <50 requests | 580 | 12,989 | −15.5% | $691 | $45 | $52 | $4.92 | −$12 (−1.7%) |
+| 50-199 requests | 365 | 39,305 | −22.5% | $2,523 | $333 | $300 | $4.91 | +$28 (+1.1%) |
+| 200+ requests | 193 | 101,751 | −25.8% | $12,244 | $2,797 | $1,858 | $8.16 | +$931 (+7.1%) |
+| main sessions | 273 | 63,944 | −21.4% | $8,797 | $1,713 | $1,512 | $5.44 | +$196 (+2.2%) |
+| subagents | 865 | 90,101 | −28.0% | $6,662 | $1,462 | $698 | $12.55 | +$752 (+10.1%) |
+
+| Item | Edited | Chars removed | Model called `recall` for it |
+|---|---|---|---|
+| large tool outputs (distilled) | 24,618 | 268M | 4.0% |
+| small tool outputs (omitted) | 31,486 | 40M | 1.9% |
+| old exchanges (omitted) | 566 | 44M | 1.2% |
+| old screenshots (removed) | 3,335 | 21M | 3.4% |
+
+**How it is computed**
+
+- *Context tokens*: for every edit, the characters it kept out (÷ 4) times the number of later requests that
+  carried the smaller context (until the session ended or a compaction dropped the entry), against the
+  context tokens the provider reported. The counterfactual assumes the agent would have made the same
+  requests without the guard; in reality a bigger context would have compacted earlier.
+- *Cheaper context*: those tokens priced at each request's own cache-read / uncached mix and prices.
+- *Cache rewrites*: on the first request after each edit, the extra uncached input beyond the median of the
+  three requests before, minus what requests **without** an edit show at the same idle gap and position
+  (a cache that went cold anyway is not charged to the guard).
+- *Recall*: share of edited items whose entry id the model later passed to `recall`.
+
+**Limits:** one user's sessions; dollar figures are estimates; sessions under 50 requests do not pay back the
+cache rewrite (net −1.7%). Since this data was collected, 0.3.4 added a run-end break-even gate
+(simulated on the same sessions: run-end net from +$80 to +$880) and omits more old exchanges
+(+8% saving in [a replay](REPLAY.md)).
+
+## Single runs
+
 Single runs on Pi 1.0.3, not a benchmark: the main model takes a different path each time. Costs are what Pi
 reports at list price. How to reproduce them: [TESTING.md](TESTING.md).
 
-## Examples
+### Examples
 
 Real runs on public code: each example ran once with the guard on and once with it off (`--no-guard`), from
 the same prompts. Reproduce with `node test/e2e/examples.mjs`.
@@ -93,7 +137,7 @@ question pin) and the model searched again; the smaller context pays off only in
 Numbers on the generated StatusBadge test repo (96% removed, `recall` of a removed line) are in
 [TESTING.md](TESTING.md#results-pi-103).
 
-## Long autonomous runs
+### Long autonomous runs
 
 **Measured** (Pi 1.0.3, e2e scenario `long`: "fix all failing tests" in a generated project with 10 bugs,
 the full suite after every fix; single runs, not a benchmark; costs are what Pi reports at list price):
@@ -137,7 +181,7 @@ and replaced 4 of 7 small reads of files the agent had already edited with one-l
 - Details: [CACHE.md](CACHE.md#mid-run-checkpoints), [DESIGN.md](DESIGN.md#mid-run-checkpoints),
   wording probe in [JEV.md](JEV.md#checkpoint-wording).
 
-## Old images
+### Old images
 
 Claude Sonnet 5.5 with `pi-claude-auth`, 2026-10-08: six 1200×800 PNGs, read one per message, then a
 follow-up about the second one. The run end removed the four images that were 3–6 turns old, with no Jev

@@ -72,7 +72,7 @@ A stricter token filter (paths and identifiers only) gave the same picture (larg
 
 ## Limitations
 
-- One user's sessions (mostly coding, game and data work), two providers.
+- One user's sessions, two providers.
 - The proxy only sees distinctive tokens; plain-prose needs are invisible to it.
 - Edits are not applied during the replay, so later passes see full outputs; in real use, outputs removed
   at a checkpoint are not judged again at run end.
