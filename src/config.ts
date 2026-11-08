@@ -122,7 +122,7 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	smallKeepThreshold: 0.45,
 	pruneExchanges: true,
 	keepRecentExchanges: 2,
-	exchangeOmitThreshold: 0.2,
+	exchangeOmitThreshold: 0.35,
 	exchangeBreakEven: true,
 	runEndBreakEven: true,
 	exchangeMinSavingChars: 8_000,

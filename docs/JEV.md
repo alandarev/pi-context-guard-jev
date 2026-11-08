@@ -195,9 +195,11 @@ same files, task, decisions or facts." Probed with `node test/e2e/probe-items.mj
 | 0.1 – 0.4 | 42/42 | 0/16 | 26/26 |
 | 0.5 | 41/42 | 1/16 | 26/26 |
 
-`exchangeOmitThreshold` is 0.2: omit only when Jev is clearly sure, with a wide margin to the weakest
-relevant exchange (0.47). The sessions are synthetic or generated, so real sessions may be less clear-cut;
-the margin is meant to absorb that. Repetitions agreed within 0.03.
+`exchangeOmitThreshold` was 0.2 at first: omit only when Jev is clearly sure, with a wide margin to the
+weakest relevant exchange (0.47). Repetitions agreed within 0.03. A replay of 64 real sessions
+([REPLAY.md](REPLAY.md)) found the margin wider than needed: exchanges omitted at P < 0.35 still had about
+half the later-use rate of kept ones (1.1% vs 2.0% of their distinctive tokens), and omitted 74 instead of
+34 of 207 exchanges. The default is now 0.35, still below the weakest relevant probe exchange.
 
 ### Small outputs
 
@@ -241,7 +243,7 @@ answer did not quote but that a natural next question would need.
 | `maxKeepRatio` | 0.6 | If most of the output is kept anyway, the saving does not justify the cache miss and the lost context |
 | `minResultChars` | 4,000 | Reads around 2.3k characters were never worth an edit |
 | `smallKeepThreshold` | 0.45 | Small-output probe above: needed outputs ≥ 0.48, superseded or unneeded ≤ 0.41 |
-| `exchangeOmitThreshold` | 0.2 | Exchange probe above: unrelated ≤ 0.10, relevant ≥ 0.47; omit only when Jev is clearly sure |
+| `exchangeOmitThreshold` | 0.35 | Exchange probe above: unrelated ≤ 0.10, relevant ≥ 0.47; real-session replay ([REPLAY.md](REPLAY.md)) |
 | `midRunChunkKeepThreshold` | 0.6 | Checkpoint probe above: 0.5 kept 50–100% of everything; 0.6 kept in-use files and dropped finished ones |
 
 When an answer is missing, the request fails or the budget runs out, the extension keeps everything.

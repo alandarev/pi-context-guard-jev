@@ -239,7 +239,7 @@ Jev sees the current work (`user_question`, `earlier_conversation`, and `agent_p
 `final_answer` at run end) and, per exchange, the prompt (at most 600 characters), the last assistant text
 (800), the tool calls as `toolLabel()`s (at most 20) and the size. The question: "Is exchange_N still
 relevant to the current work? Relevant means the agent may need its details: the same files, task,
-decisions or facts." An exchange is omitted only when P < `exchangeOmitThreshold` (0.2; probe in
+decisions or facts." An exchange is omitted only when P < `exchangeOmitThreshold` (0.35; probe in
 [JEV.md](JEV.md#old-exchanges)). Then the prompt entry gets the stub
 `[context-guard] Omitted an earlier exchange judged unrelated to the current work: "<first 120 characters of the prompt>" (N messages, ~Mk tokens). Full exchange: recall({"entryId":"<prompt entry id>"}).`
 and every other editable entry gets `replacement: null`, which omits it from model context. The record's
