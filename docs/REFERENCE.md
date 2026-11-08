@@ -23,6 +23,7 @@ If the model or credential is missing, the extension does nothing and the status
 | `🛡 guard off` | Turned off with `/guard off` or `"enabled": false` |
 | `🛡 no openrouter key` | No credential for the classifier's provider (the provider name is filled in) |
 | `🛡 Jev model not found` | The configured `model` is not in Pi's classifier catalog |
+| `🛡 Jev failing: 402 insufficient credits` | Every Jev request of the last pass failed, so nothing is distilled (old images are still removed). The text is the HTTP status and the provider's message; a warning shows the full error once, and `/guard status` repeats it. After a 401, 402 or 403 Jev requests are paused for 5 minutes (`/guard reload` retries at once). The first request that succeeds clears it. After a restart it is read from the last record on the branch |
 
 The token figure is Pi's usual estimate, characters ÷ 4. It counts what is kept out of the model's context
 **on the current branch right now**: original size minus replacement size, for every distilled output,
@@ -36,7 +37,7 @@ results; then Σ shows the total of every pass on the branch so far. It is not a
 |---|---|
 | `/guard` or `/guard status` | Shows whether the guard is on, the model, the savings on this branch (distilled outputs and omitted exchanges), Jev runs and mid-run checkpoints, requests and cost, whether checkpoints and exchange pruning are on, and the last run's or checkpoint's result for each item (large, small, exchange), including Jev traces such as `kw.15 focus=chunk_4:.52 keep 9/29` or `p.06` |
 | `/guard on` / `/guard off` | Turns the guard on or off and saves `enabled` to the settings file |
-| `/guard reload` | Re-reads the settings file and shows any warnings again |
+| `/guard reload` | Re-reads the settings file, shows any warnings again, and ends a Jev failure pause (the next pass tries Jev again) |
 
 Settings are read at session start and on `/guard reload`.
 
@@ -155,6 +156,9 @@ sessions. See OpenRouter's data policy:
   conversation (the ongoing task), so a follow-up that goes somewhere new may need something that was
   removed. The header and omission lines say what is missing, and `recall` returns it. An earlier task
   that comes back after several unrelated ones may have been omitted as a whole exchange.
+- **Jev failures.** When Jev requests fail (for example the OpenRouter account is out of credits), every
+  output is kept as it is: the guard fails safe, and the status bar says `Jev failing: …` with the
+  provider's error. Each run record stores the number of failed requests and the first error.
 - **Latency.** Settling waits for Jev. This adds about 0.5–1.2 s after each qualifying run (measured), and
   never more than `timeoutMs` (8 s). A mid-run checkpoint pauses the run the same way.
 - **Cost.** Each qualifying run costs a few Jev requests, measured at under $0.001 per run. The first prompt

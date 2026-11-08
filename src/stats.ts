@@ -29,6 +29,10 @@ export interface RunRecordData {
 	costUsd: number;
 	ms: number;
 	timedOut: boolean;
+	/** Jev requests that failed with an error (absent when none did). */
+	errors?: number;
+	/** First error message of those (clipped, health.ts). */
+	error?: string;
 	results: {
 		/** Absent in records that only had large outputs. */
 		kind?: "large" | "small" | "exchange" | "image";

@@ -226,6 +226,69 @@ test("/guard off|on persists to the temp agent dir and pauses distillation", asy
 	assert.equal(notes.at(-1), "Usage: /guard [status|on|off|reload]");
 });
 
+test("Jev failing (402 no credits): status, one warning, the error in the record and /guard status, pause until /guard reload", async () => {
+	const { ctx, calls } = fakeCtx();
+	const error =
+		'System One API error (402): {"error":{"message":"Insufficient credits. Add more using https://openrouter.ai/settings/credits","code":402}}';
+	let failing = true;
+	ctx.modelRegistry.classify = async (model: unknown, request: ClassifierRequest, options: { signal?: AbortSignal }) => {
+		calls.push({ model, request, options });
+		return failing ? { answers: {}, stopReason: "error", errorMessage: error } : fakeAnswers(request);
+	};
+	const notes: [string, string | undefined][] = [];
+	const statuses: string[] = [];
+	Object.assign(ctx, { hasUI: true });
+	ctx.ui.notify = (message: string, level?: string) => {
+		notes.push([message, level]);
+	};
+	ctx.ui.setStatus = ((_key: string, text: string) => {
+		statuses.push(text);
+	}) as () => void;
+	await handler("session_start")({ type: "session_start" }, ctx);
+
+	const result = (await handler("agent_before_settle")(settleEvent(), ctx)) as { entries: Record<string, any>[] };
+	assert.ok(calls.length > 0);
+	const record = result.entries.at(-1)!;
+	assert.equal(record.customType, "context-guard");
+	assert.equal(record.data.errors, record.data.requests);
+	assert.equal(record.data.error, error);
+	assert.equal(result.entries.length, 2, "no edits, only the other extension's draft and the record");
+	assert.equal(statuses.at(-1), "🛡 Jev failing: 402 insufficient credits");
+	const warnings = notes.filter(([, level]) => level === "warning");
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0][0], /^context-guard: every Jev request failed \(\d+\), so nothing is being distilled: System One API error \(402\).*paused for 5 min/);
+
+	// Paused: the next run end sends no request and warns no more.
+	const before = calls.length;
+	assert.equal(await handler("agent_before_settle")(settleEvent(), ctx), undefined);
+	assert.equal(calls.length, before);
+	assert.equal(notes.filter(([, level]) => level === "warning").length, 1);
+
+	// /guard status shows the failure; /guard reload retries at once.
+	const guard = extension.commands.get("guard")!;
+	await guard.handler("status", ctx);
+	assert.match(notes.at(-1)![0], /⚠ Jev is failing: every Jev request failed/);
+	failing = false;
+	await guard.handler("reload", ctx);
+	assert.doesNotMatch(notes.at(-1)![0], /Jev is failing/);
+	const ok = (await handler("agent_before_settle")(settleEvent(), ctx)) as { entries: Record<string, any>[] };
+	assert.equal(ok.entries.at(-1)!.data.errors, undefined);
+	assert.equal(statuses.at(-1), "🛡 0 saved");
+});
+
+test("session_start shows a failure the last record on the branch recorded", async () => {
+	const { ctx } = fakeCtx();
+	const statuses: string[] = [];
+	Object.assign(ctx, { hasUI: true });
+	ctx.ui.setStatus = ((_key: string, text: string) => {
+		statuses.push(text);
+	}) as () => void;
+	const record = { type: "custom", customType: "context-guard", data: { v: 1, model: "m", savedChars: 0, requests: 2, inputTokens: 0, costUsd: 0, ms: 1, timedOut: false, errors: 2, error: "System One API error (401): {\"error\":{\"message\":\"User not found.\",\"code\":401}}", results: [] } };
+	ctx.sessionManager.getBranch = (() => [record]) as () => never[];
+	await handler("session_start")({ type: "session_start" }, ctx);
+	assert.equal(statuses.at(-1), "🛡 Jev failing: 401 user not found");
+});
+
 // --- mid-run checkpoints (turn_end) --------------------------------------------------------------
 
 /** A run where turn i calls bash `step i`; turn 0's output is short, the others ~18k chars each. */

@@ -21,6 +21,7 @@ evidence behind the thresholds are in [JEV.md](JEV.md). Cache behaviour is in [C
 | `src/render.ts` | The replacement text: header, verbatim chunks, omission lines; the `[context-guard]` marker |
 | `src/cache-pin.ts` | Anthropic breakpoints: the previous user question, and the read point after edits (`placeGuardBreakpoints`) |
 | `src/stats.ts` | Savings and Jev usage computed from the session; status-bar text |
+| `src/health.ts` | Jev failures: a pass whose every request failed sets `Jev failing: <status> <message>` in the status bar, warns once, pauses requests for 5 min after a 401/402/403; a success clears it |
 | `src/recall.ts` | What `recall` returns (a tool output with its images, or the transcript of an omitted exchange with its user images) |
 | `src/types.ts` | Loose structural types for the Pi objects used, so the pure modules can be tested without Pi |
 
@@ -412,6 +413,7 @@ Each run (and each mid-run checkpoint) that made at least one Jev request also a
 | `savedChars` | Characters removed by this run's edits |
 | `requests`, `inputTokens`, `costUsd`, `ms` | Jev usage for the run |
 | `timedOut` | The time budget ran out |
+| `errors`, `error` | Jev requests that failed with an error (not timeouts), and the first error message (≤ 400 chars); absent when none failed |
 | `results[]` | One per item: `kind` (`large`, `small`, `exchange`; absent means large), `entryId` (for an exchange, its prompt entry), `tool`, `label`, `outcome` (`distilled`, `removed`, `kept`), `reason`, `beforeChars`, `afterChars`, `jev` |
 
 `reason` is one of `chunks`, `none-needed`, `not-worth`, `all-chunks`, `whole-needed`, `whole-chosen`,

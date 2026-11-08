@@ -47,6 +47,12 @@ export interface ProcessOutcome {
 	costUsd: number;
 	ms: number;
 	timedOut: boolean;
+	/** Jev requests answered normally. */
+	okRequests: number;
+	/** Jev requests that failed with an error (not timeouts or aborts). */
+	failedRequests: number;
+	/** First error message of the pass (health.ts). */
+	error?: string;
 }
 
 const p2 = (p: number | undefined): string => (p === undefined ? "?" : p.toFixed(2).replace(/^0/, ""));
@@ -64,7 +70,26 @@ export async function processItems(
 	const started = now();
 	// One limiter for every kind: `concurrency` is the total number of Jev requests in flight.
 	const limit = createLimiter(Math.max(1, options.concurrency));
-	const limited: ClassifyFn = (request, s) => limit(() => classify(request, s));
+	// Tally answers and errors (health.ts): a pass where every request fails is shown to the user.
+	let okRequests = 0;
+	let failedRequests = 0;
+	let error: string | undefined;
+	const failed = (message: string) => {
+		failedRequests++;
+		error ??= message;
+	};
+	const tallied: ClassifyFn = async (request, s) => {
+		try {
+			const response = await classify(request, s);
+			if (response.stopReason === "stop") okRequests++;
+			else if (response.stopReason === "error" && !s.aborted) failed(response.errorMessage || "classifier error");
+			return response;
+		} catch (err) {
+			if (!s.aborted) failed(err instanceof Error ? err.message : String(err));
+			throw err;
+		}
+	};
+	const limited: ClassifyFn = (request, s) => limit(() => tallied(request, s));
 	const judge = { timeoutMs: options.timeoutMs, concurrency: options.concurrency, maxRequestChars: options.maxSegmentChars, maxItemsPerRequest: options.maxChunksPerSegment };
 	const empty: DistillOutcome = { edits: [], records: [], savedChars: 0, requests: 0, inputTokens: 0, costUsd: 0, ms: 0, timedOut: false };
 	const [large, smallOutcome, exchangeOutcome] = await Promise.all([
@@ -82,6 +107,9 @@ export async function processItems(
 		costUsd: large.costUsd + smallOutcome.costUsd + exchangeOutcome.costUsd,
 		ms: 0,
 		timedOut: large.timedOut || smallOutcome.timedOut || exchangeOutcome.timedOut,
+		okRequests,
+		failedRequests,
+		...(error ? { error } : {}),
 	};
 
 	small.forEach((item, i) => {
@@ -144,7 +172,7 @@ export async function processItems(
 
 
 
-export const emptyOutcome = (): ProcessOutcome => ({ edits: [], records: [], savedChars: 0, requests: 0, inputTokens: 0, costUsd: 0, ms: 0, timedOut: false });
+export const emptyOutcome = (): ProcessOutcome => ({ edits: [], records: [], savedChars: 0, requests: 0, inputTokens: 0, costUsd: 0, ms: 0, timedOut: false, okRequests: 0, failedRequests: 0 });
 
 /**
  * Add the removal of old images (no Jev request; images.ts) to `outcome`. Results the outcome already

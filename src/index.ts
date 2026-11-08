@@ -37,6 +37,7 @@ import { buildCheckpointRequest } from "./decide.ts";
 import { type GuardConfig, loadConfig, parseModelRef, saveConfigPatch } from "./config.ts";
 import { collectImages, type ImageItem } from "./images.ts";
 import { omittedIdsFor, originalContent, RECALL_MAX_IMAGES, recallText } from "./recall.ts";
+import { clipError, failureFromRecord, failureStatus, failureWarning, type JevFailure, nextJevFailure } from "./health.ts";
 import { formatChars, MARKER, RECALL_TOOL } from "./render.ts";
 import { collectExchanges, collectSmall, type ExchangeItem, type SmallItem, type WorkContext } from "./items.ts";
 import { addImages, deferExchanges, dropImages, emptyOutcome, exchangeOmissions, type ProcessOptions, type ProcessOutcome, processItems } from "./process.ts";
@@ -62,6 +63,8 @@ export default function contextGuard(pi: ExtensionAPI) {
 	let config: GuardConfig = loadConfig(configPath).config;
 	let busy = false;
 	let problem: string | undefined;
+	/** Every Jev request of the last pass failed (health.ts); cleared by a successful request or /guard reload. */
+	let jevFailure: JevFailure | undefined;
 	let warned = new Set<string>();
 	// No checkpoint state is kept in memory: the memo and the read point are derived from the entries
 	// persisted on the active branch at every boundary and request (checkpoint.ts).
@@ -105,10 +108,11 @@ export default function contextGuard(pi: ExtensionAPI) {
 
 	const refreshStatus = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
-		const state: StatusState = !config.enabled ? "off" : busy ? "busy" : problem ? "problem" : "ready";
+		const shown = problem ?? (jevFailure ? failureStatus(jevFailure) : undefined);
+		const state: StatusState = !config.enabled ? "off" : busy ? "busy" : shown ? "problem" : "ready";
 		const color: Colorize = (c, text) => ctx.ui.theme.fg(c, text);
 		try {
-			ctx.ui.setStatus(STATUS_KEY, formatStatus(stats(ctx), state, color, problem));
+			ctx.ui.setStatus(STATUS_KEY, formatStatus(stats(ctx), state, color, shown));
 		} catch {
 			// Status is cosmetic; never let it break a session event.
 		}
@@ -148,6 +152,8 @@ export default function contextGuard(pi: ExtensionAPI) {
 		busy = false;
 		reload(ctx);
 		written = [];
+		// After a restart, show a failure the last pass on this branch recorded until a request succeeds.
+		jevFailure = failureFromRecord(stats(ctx).last);
 		if (config.enabled) resolveClassifier(ctx);
 		refreshStatus(ctx);
 	});
@@ -192,11 +198,18 @@ export default function contextGuard(pi: ExtensionAPI) {
 			refreshStatus(ctx);
 			return undefined;
 		}
+		// Paused after a persistent failure (no credits, bad key): no request until the pause ends.
+		if (jevFailure && jevFailure.pausedUntil > Date.now()) {
+			refreshStatus(ctx);
+			return undefined;
+		}
 		busy = true;
 		refreshStatus(ctx);
 		if (ctx.hasUI) ctx.ui.setWorkingMessage("context-guard: distilling old context with Jev…");
 		try {
-			return await processItems(run, small, exchanges, work, classify, options, ctx.signal);
+			const outcome = await processItems(run, small, exchanges, work, classify, options, ctx.signal);
+			noteJevHealth(ctx, outcome);
+			return outcome;
 		} catch (err) {
 			warnOnce(ctx, "distill", `distillation failed: ${err instanceof Error ? err.message : String(err)}`);
 			return undefined;
@@ -205,6 +218,16 @@ export default function contextGuard(pi: ExtensionAPI) {
 			if (ctx.hasUI) ctx.ui.setWorkingMessage();
 			refreshStatus(ctx);
 		}
+	};
+
+	/** Update the failure state after a pass; warn when Jev starts failing (or fails differently), note recovery. */
+	const noteJevHealth = (ctx: ExtensionContext, outcome: ProcessOutcome) => {
+		const before = jevFailure;
+		const now = Date.now();
+		jevFailure = nextJevFailure(jevFailure, outcome, now);
+		if (!ctx.hasUI) return;
+		if (jevFailure && jevFailure !== before && jevFailure.short !== before?.short) ctx.ui.notify(`context-guard: ${failureWarning(jevFailure, now)}`, "warning");
+		else if (!jevFailure && before) ctx.ui.notify("context-guard: Jev requests succeed again.", "info");
 	};
 
 	const recordOf = (outcome: ProcessOutcome, phase: "mid-run" | "run-end"): CustomDraft => ({
@@ -220,6 +243,7 @@ export default function contextGuard(pi: ExtensionAPI) {
 			costUsd: outcome.costUsd,
 			ms: outcome.ms,
 			timedOut: outcome.timedOut,
+			...(outcome.failedRequests > 0 ? { errors: outcome.failedRequests, error: clipError(outcome.error ?? "unknown error") } : {}),
 			results: outcome.records.map(({ kind, entryId, tool, label, outcome, reason, beforeChars, afterChars, jev, omitted }) => ({
 				kind,
 				...(omitted ? { omitted } : {}),
@@ -433,9 +457,11 @@ export default function contextGuard(pi: ExtensionAPI) {
 			if (arg === "on" || arg === "off") {
 				config.enabled = arg === "on";
 				saveConfigPatch(configPath, { enabled: config.enabled });
+				jevFailure = undefined;
 				if (config.enabled) resolveClassifier(ctx);
 			} else if (arg === "reload") {
 				warned = new Set();
+				jevFailure = undefined;
 				reload(ctx);
 				if (config.enabled) resolveClassifier(ctx);
 			} else if (arg && arg !== "status") {
@@ -443,14 +469,16 @@ export default function contextGuard(pi: ExtensionAPI) {
 				return;
 			}
 			refreshStatus(ctx);
-			ctx.ui.notify(describe(config, stats(ctx), problem), "info");
+			ctx.ui.notify(describe(config, stats(ctx), problem, jevFailure), "info");
 		},
 	});
 }
 
-function describe(config: GuardConfig, stats: GuardStats, problem: string | undefined): string {
+function describe(config: GuardConfig, stats: GuardStats, problem: string | undefined, failure?: JevFailure): string {
+	const now = Date.now();
 	const lines = [
 		`context-guard is ${config.enabled ? "on" : "off"}${problem && config.enabled ? ` (${problem})` : ""} · model ${config.model}`,
+		...(failure && config.enabled ? [`⚠ Jev is failing: ${failureWarning(failure, now)}`] : []),
 		`Saving ~${formatTokens(stats.savedTokens)} tokens (${formatChars(stats.savedChars)} chars): ${stats.distilledResults} distilled tool output(s), ${stats.imageResults} output(s) without their images, ${stats.omittedExchanges} omitted exchange(s).`,
 		...(stats.compacted ? [`Σ ~${formatTokens(stats.lifetimeTokens)} tokens saved on this branch in total; a compaction has since dropped the earlier edits from context.`] : []),
 		`Jev: ${stats.runs - stats.checkpoints} run(s) and ${stats.checkpoints} mid-run checkpoint(s), ${stats.requests} request(s), ${formatCost(stats.costUsd)} on this branch.`,
@@ -460,6 +488,7 @@ function describe(config: GuardConfig, stats: GuardStats, problem: string | unde
 	if (last) {
 		const kinds = ["large", "small", "exchange", "image"].map((kind) => `${last.results.filter((r) => (r.kind ?? "large") === kind).length} ${kind}`).join(", ");
 		lines.push(`Last ${last.phase === "mid-run" ? "checkpoint" : "run"} (${(last.ms / 1000).toFixed(1)} s${last.timedOut ? ", timed out" : ""}; ${kinds}):`);
+		if (last.errors) lines.push(`  ${last.errors} of ${last.requests} Jev request(s) failed: ${last.error ?? "unknown error"}`);
 		for (const result of last.results) {
 			const sizes = result.outcome === "kept" ? formatChars(result.beforeChars) : `${formatChars(result.beforeChars)} → ${formatChars(result.afterChars)}`;
 			lines.push(`  ${result.outcome.padEnd(9)} ${(result.kind ?? "large").padEnd(9)} ${sizes.padEnd(13)} ${result.label}${result.reason ? ` (${result.reason})` : ""}`);
