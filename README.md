@@ -4,9 +4,10 @@
 ![license](https://img.shields.io/npm/l/pi-context-guard-jev)
 ![Pi ≥ 1.0.3](https://img.shields.io/badge/Pi-%E2%89%A5%201.0.3-blue)
 
-**Tool output is 57% of what your [Pi](https://github.com/earendil-works/pi) agent re-sends with every
-request (1,138 real sessions). This extension trims what the work no longer needs: an estimated 25% fewer
-context tokens, for 1.6¢ per session.**
+**Tool calls, their outputs, and old irrelevant communique are 80% of the messages your
+[Pi](https://github.com/earendil-works/pi) agent re-sends with every request (1,138 real sessions). This
+extension trims what the work no longer needs (old tool output, exchanges about earlier tasks, screenshots,
+long arguments): an estimated 25% fewer context tokens, for 1.6¢ per session.**
 
 ```bash
 pi install npm:pi-context-guard-jev
