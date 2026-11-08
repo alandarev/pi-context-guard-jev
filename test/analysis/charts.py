@@ -8,13 +8,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 d = json.load(open("docs/data/real-usage.json"))
-GREEN, GREY, INK = "#2e9e5b", "#b8bec6", "#1f2328"
+GREEN, GREY, MUTED, INK, RED = "#2e9e5b", "#8c959f", "#6e7781", "#1f2328", "#c2410c"
 plt.rcParams.update(
     {
         "font.size": 12,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.edgecolor": "#8c959f",
+        "axes.edgecolor": GREY,
         "text.color": INK,
         "axes.labelcolor": INK,
         "xtick.color": INK,
@@ -22,67 +22,99 @@ plt.rcParams.update(
     }
 )
 
-# 1. Context size over a long session, with and without the guard.
-pts = d["contextCurve200plus"]["points"]
+# 1. Context per request in long sessions: observed with the guard vs estimated without it.
+c = d["contextCurve200plus"]
+pts = c["points"]
 x = [p["request"] for p in pts]
 w = [p["withGuard"] / 1000 for p in pts]
 wo = [p["withoutGuard"] / 1000 for p in pts]
-fig, ax = plt.subplots(figsize=(9, 4.2), dpi=150)
-ax.fill_between(x, w, wo, color=GREEN, alpha=0.15, lw=0)
-ax.plot(x, wo, color=GREY, lw=2.5, label="without context guard")
-ax.plot(x, w, color=GREEN, lw=2.5, label="with context guard")
-last = pts[-1]
+cut = next(
+    i for i, p in enumerate(pts) if p["n"] < 500
+)  # fewer than 50 sessions reach this far: dashed tail
+fig, ax = plt.subplots(figsize=(9, 4.4), dpi=150)
+ax.fill_between(x, w, wo, color=GREEN, alpha=0.13, lw=0)
+for seg, style in ((slice(0, cut + 1), "-"), (slice(cut, None), (0, (2, 2)))):
+    ax.plot(
+        x[seg],
+        wo[seg],
+        color=GREY,
+        lw=2.5,
+        ls=style,
+        label="estimated without the guard" if style == "-" else None,
+    )
+    ax.plot(
+        x[seg],
+        w[seg],
+        color=GREEN,
+        lw=2.5,
+        ls=style,
+        label="with the guard" if style == "-" else None,
+    )
+i = x.index(200)
 ax.annotate(
-    f"−{(1 - last['withGuard'] / last['withoutGuard']) * 100:.0f}%",
-    xy=(x[-1], (w[-1] + wo[-1]) / 2),
-    xytext=(8, 0),
+    f"−{(1 - w[i] / wo[i]) * 100:.0f}% at request 200",
+    xy=(200, (w[i] + wo[i]) / 2),
+    xytext=(-175, 60),
     textcoords="offset points",
-    va="center",
-    fontsize=15,
+    fontsize=14,
     fontweight="bold",
     color=GREEN,
+    arrowprops=dict(arrowstyle="-", color=GREEN, lw=1),
+)
+ax.text(x[-1] + 6, wo[-1], f"{wo[-1]:.0f}k", va="center", color=MUTED)
+ax.text(x[-1] + 6, w[-1], f"{w[-1]:.0f}k", va="center", color=GREEN, fontweight="bold")
+ax.text(
+    x[-1],
+    12,
+    "dashed: fewer than 50 sessions reach this far",
+    ha="right",
+    fontsize=9,
+    color=MUTED,
 )
 ax.set_xlabel("request # in the session")
 ax.set_ylabel("context sent (k tokens)")
 ax.set_title(
-    f"Average context of {d['contextCurve200plus']['sessions']} real long sessions (200+ requests)",
+    f"Context per request · {c['sessions']} real sessions of 200+ requests (no compaction)",
     loc="left",
     fontsize=13,
 )
 ax.legend(frameon=False, loc="upper left")
-ax.set_xlim(0, x[-1] + 30)
+ax.set_xlim(0, x[-1] + 40)
 ax.set_ylim(0)
 fig.tight_layout()
 fig.savefig("assets/context-curve.png")
 
-# 2. Context reduction by session length and role.
+# 2. Estimated net effect on the bill by session length.
+L = d["bySessionLength"]
 groups = [
-    ("< 50 requests", d["bySessionLength"]["<50 requests"]),
-    ("50–199", d["bySessionLength"]["50-199 requests"]),
-    ("200+", d["bySessionLength"]["200+ requests"]),
-    ("subagents", d["byRole"]["subagents"]),
-    ("all", d["total"]),
+    ("under 50 requests", L["<50 requests"]),
+    ("50–199 requests", L["50-199 requests"]),
+    ("200+ requests", L["200+ requests"]),
 ]
-fig, ax = plt.subplots(figsize=(9, 3.4), dpi=150)
-labels = [g[0] for g in groups]
-vals = [g[1]["contextReductionPct"] for g in groups]
-bars = ax.barh(
-    labels[::-1],
-    vals[::-1],
-    color=[GREEN if l == "all" else "#7cc49a" for l in labels[::-1]],
-)
-for b, v, g in zip(bars, vals[::-1], [g[1] for g in groups][::-1]):
+net = [g["netSavingPct"] for _, g in groups]
+fig, ax = plt.subplots(figsize=(9, 3.2), dpi=150)
+ax.barh(range(3), net, color=[RED if v < 0 else GREEN for v in net], height=0.6)
+ax.set_yticks(range(3), [f"{n}\n{g['sessions']:,} sessions" for n, g in groups])
+ax.invert_yaxis()
+ax.axvline(0, color=INK, lw=0.8)
+for k, v in enumerate(net):
     ax.text(
-        b.get_width() + 0.4,
-        b.get_y() + b.get_height() / 2,
-        f"−{v:.0f}%  ({g['sessions']:,} sessions)",
+        max(v, 0) + 0.2,
+        k,
+        f"bill +{abs(v):.1f}%" if v < 0 else f"bill −{v:.1f}%",
         va="center",
-        fontsize=11,
+        fontsize=12,
+        fontweight="bold",
+        color=RED if v < 0 else GREEN,
     )
-ax.set_xlim(0, max(vals) * 1.45)
+ax.set_xlim(-3, 10)
 ax.set_xticks([])
 ax.spines["bottom"].set_visible(False)
-ax.set_title("Fewer context tokens sent, by session length", loc="left", fontsize=13)
+ax.spines["left"].set_visible(False)
+ax.tick_params(axis="y", length=0)
+ax.set_title(
+    "Estimated main-model bill, net of cache rewrites and Jev", loc="left", fontsize=13
+)
 fig.tight_layout()
-fig.savefig("assets/reduction.png")
-print("wrote assets/context-curve.png assets/reduction.png")
+fig.savefig("assets/bill-by-length.png")
+print("wrote assets/context-curve.png assets/bill-by-length.png")
