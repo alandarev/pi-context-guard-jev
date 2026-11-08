@@ -22,8 +22,8 @@ output is sent to OpenRouter → TypeSafe ([what exactly](https://github.com/ala
 1. When a run ends, and at checkpoints in long runs, **Jev** (a small, fast classifier by TypeSafe) judges
    each old tool output against the question, the answer and the ongoing work.
 2. Lines still needed stay verbatim; the rest becomes a one-line note. Unrelated old exchanges and
-   screenshots older than 3 turns become notes too; on GPT (OpenAI Codex), long arguments of old tool
-   calls (written files, heredocs) keep only their first and last lines. Edits that are not expected to pay back their
+   screenshots older than 3 turns become notes too; long arguments of old tool calls (written files,
+   heredocs) keep only their first and last lines (not on Claude Haiku, which misreads them). Edits that are not expected to pay back their
    prompt-cache rewrite are skipped.
 3. Every note ends with `recall({"entryId":"…"})`, so the model can fetch the original.
 

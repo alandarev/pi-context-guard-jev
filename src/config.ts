@@ -99,10 +99,11 @@ export interface GuardConfig {
 	/** A string argument is shortened only if that removes at least this many characters. */
 	argMinChars: number;
 	/**
-	 * Providers (of the session's model) for which arguments are shortened. Claude (Haiku) took its
-	 * shortened calls for what it had sent and re-checked its files (docs/DESIGN.md → Arguments).
+	 * Models whose sessions never get shortened arguments: glob patterns (`*` = any text, case-insensitive)
+	 * matched against the model id and `provider/id`. Claude Haiku took its shortened calls for what it
+	 * had sent and re-checked its files; Opus, Sonnet and GPT did not (docs/DESIGN.md → Arguments).
 	 */
-	argStubProviders: string[];
+	argStubExcludeModels: string[];
 }
 
 export const DEFAULT_CONFIG: GuardConfig = {
@@ -141,7 +142,7 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	imageKeepTurns: 3,
 	argKeepTurns: 4,
 	argMinChars: 2_000,
-	argStubProviders: ["openai-codex"],
+	argStubExcludeModels: ["*haiku*"],
 };
 
 const NUMBER_RANGES: Partial<Record<keyof GuardConfig, [number, number]>> = {
@@ -175,7 +176,7 @@ const INTEGER_KEYS = new Set<keyof GuardConfig>(["minResultChars", "minRunChars"
 
 /** Merge untrusted JSON over the defaults, keeping only well-typed, in-range values. */
 export function normalizeConfig(raw: unknown): GuardConfig {
-	const config: GuardConfig = { ...DEFAULT_CONFIG, excludeTools: [...DEFAULT_CONFIG.excludeTools], argStubProviders: [...DEFAULT_CONFIG.argStubProviders] };
+	const config: GuardConfig = { ...DEFAULT_CONFIG, excludeTools: [...DEFAULT_CONFIG.excludeTools], argStubExcludeModels: [...DEFAULT_CONFIG.argStubExcludeModels] };
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return config;
 	const input = raw as Record<string, unknown>;
 	for (const key of Object.keys(DEFAULT_CONFIG) as (keyof GuardConfig)[]) {
@@ -192,8 +193,8 @@ export function normalizeConfig(raw: unknown): GuardConfig {
 			config.model = value.trim();
 		} else if (key === "excludeTools" && Array.isArray(value)) {
 			config.excludeTools = value.filter((name): name is string => typeof name === "string");
-		} else if (key === "argStubProviders" && Array.isArray(value)) {
-			config.argStubProviders = value.filter((name): name is string => typeof name === "string");
+		} else if (key === "argStubExcludeModels" && Array.isArray(value)) {
+			config.argStubExcludeModels = value.filter((name): name is string => typeof name === "string");
 		}
 	}
 	return config;
@@ -231,4 +232,12 @@ export function saveConfigPatch(path: string, patch: Partial<GuardConfig>): void
 	}
 	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, `${JSON.stringify({ ...current, ...patch }, null, 2)}\n`);
+}
+
+/** True when `provider/id` or `id` matches one of the glob `patterns` (`*` = any text, case-insensitive). */
+export function modelMatches(patterns: readonly string[], provider: string, id: string): boolean {
+	return patterns.some((pattern) => {
+		const re = new RegExp(`^${pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i");
+		return re.test(id) || re.test(`${provider}/${id}`);
+	});
 }

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_CONFIG, loadConfig, normalizeConfig, parseModelRef, saveConfigPatch } from "../../src/config.ts";
+import { DEFAULT_CONFIG, loadConfig, modelMatches, normalizeConfig, parseModelRef, saveConfigPatch } from "../../src/config.ts";
 
 test("normalizeConfig returns defaults for non-objects", () => {
 	for (const raw of [undefined, null, 42, "x", [1, 2]]) assert.deepEqual(normalizeConfig(raw), DEFAULT_CONFIG);
@@ -158,10 +158,19 @@ test("item settings: defaults and validation", () => {
 });
 
 test("normalizeConfig validates the argument settings", () => {
-	const config = normalizeConfig({ argKeepTurns: 0, argMinChars: 500, argStubProviders: ["openai-codex", 3, "anthropic"] });
-	assert.deepEqual([config.argKeepTurns, config.argMinChars, config.argStubProviders], [0, 500, ["openai-codex", "anthropic"]]);
-	const bad = normalizeConfig({ argKeepTurns: 2.5, argMinChars: 10, argStubProviders: "anthropic" });
-	assert.deepEqual([bad.argKeepTurns, bad.argMinChars, bad.argStubProviders], [4, 2_000, ["openai-codex"]]);
-	bad.argStubProviders.push("x");
-	assert.deepEqual(DEFAULT_CONFIG.argStubProviders, ["openai-codex"]);
+	const config = normalizeConfig({ argKeepTurns: 0, argMinChars: 500, argStubExcludeModels: ["*haiku*", 3, "openai-codex/*"] });
+	assert.deepEqual([config.argKeepTurns, config.argMinChars, config.argStubExcludeModels], [0, 500, ["*haiku*", "openai-codex/*"]]);
+	const bad = normalizeConfig({ argKeepTurns: 2.5, argMinChars: 10, argStubExcludeModels: "haiku" });
+	assert.deepEqual([bad.argKeepTurns, bad.argMinChars, bad.argStubExcludeModels], [4, 2_000, ["*haiku*"]]);
+	bad.argStubExcludeModels.push("x");
+	assert.deepEqual(DEFAULT_CONFIG.argStubExcludeModels, ["*haiku*"]);
+	// Glob match on the id or provider/id, case-insensitive.
+	assert.equal(modelMatches(["*haiku*"], "anthropic", "claude-haiku-5-5"), true);
+	assert.equal(modelMatches(["*haiku*"], "openrouter", "anthropic/claude-Haiku-4.5"), true);
+	assert.equal(modelMatches(["*haiku*"], "anthropic", "claude-opus-5-5"), false);
+	assert.equal(modelMatches(["openai-codex/*"], "openai-codex", "gpt-5.6-luna"), true);
+	assert.equal(modelMatches(["gpt-5.6-luna"], "openai-codex", "gpt-5.6-luna"), true);
+	assert.equal(modelMatches(["gpt-5.6"], "openai-codex", "gpt-5.6-luna"), false);
+	assert.equal(modelMatches(["a.b(c)"], "p", "a.b(c)"), true);
+	assert.equal(modelMatches(["a.b(c)"], "p", "axb(c)"), false);
 });

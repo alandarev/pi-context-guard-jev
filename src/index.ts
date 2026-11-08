@@ -34,7 +34,7 @@ import {
 	type WrittenEntry,
 } from "./checkpoint.ts";
 import { buildCheckpointRequest } from "./decide.ts";
-import { type GuardConfig, loadConfig, parseModelRef, saveConfigPatch } from "./config.ts";
+import { type GuardConfig, loadConfig, modelMatches, parseModelRef, saveConfigPatch } from "./config.ts";
 import { ARG_MARKER, type ArgsItem, collectArgs } from "./args.ts";
 import { collectImages, type ImageItem } from "./images.ts";
 import { omittedIdsFor, originalContent, RECALL_MAX_IMAGES, recallText } from "./recall.ts";
@@ -321,9 +321,9 @@ export default function contextGuard(pi: ExtensionAPI) {
 
 	const imageSaving = (items: readonly (ImageItem | ArgsItem)[]): number => items.reduce((n, i) => n + i.beforeChars - i.afterChars, 0);
 
-	/** Old tool calls with long arguments, when the session's provider is in `argStubProviders`. */
+	/** Old tool calls with long arguments, unless the session's model is in `argStubExcludeModels`. */
 	const collectArgsFor = (ctx: ExtensionContext, entries: ProjectedEntryLike[]): ArgsItem[] =>
-		config.argStubProviders.includes(ctx.model?.provider ?? "") ? collectArgs(entries, config.argKeepTurns, config.argMinChars) : [];
+		ctx.model && !modelMatches(config.argStubExcludeModels, ctx.model.provider, ctx.model.id) ? collectArgs(entries, config.argKeepTurns, config.argMinChars) : [];
 
 	pi.on("turn_end", async (event, ctx) => {
 		if (!config.enabled || !config.midRun || event.outcome !== "completed") return;
@@ -519,7 +519,7 @@ function describe(config: GuardConfig, stats: GuardStats, problem: string | unde
 		`Saving ~${formatTokens(stats.savedTokens)} tokens (${formatChars(stats.savedChars)} chars): ${stats.distilledResults} distilled tool output(s), ${stats.imageResults} output(s) without their images, ${stats.argCalls} tool call(s) with long arguments shortened, ${stats.omittedExchanges} omitted exchange(s).`,
 		...(stats.compacted ? [`Σ ~${formatTokens(stats.lifetimeTokens)} tokens saved on this branch in total; a compaction has since dropped the earlier edits from context.`] : []),
 		`Jev: ${stats.runs - stats.checkpoints} run(s) and ${stats.checkpoints} mid-run checkpoint(s), ${stats.requests} request(s), ${formatCost(stats.costUsd)} on this branch.`,
-		`Mid-run checkpoints are ${config.midRun ? `on (outputs ≥ ${config.midRunMinAgeTurns} turns old, batches of ≥ ${formatChars(config.midRunBatchChars)} chars)` : "off"}; old exchanges are ${config.pruneExchanges ? `judged (all but the last ${config.keepRecentExchanges})` : "kept"}; tool-output images are ${config.imageKeepTurns > 0 ? `removed after ${config.imageKeepTurns} turns` : "kept"}; long tool-call arguments are ${config.argKeepTurns > 0 && config.argStubProviders.length > 0 ? `shortened after ${config.argKeepTurns} turns (${config.argStubProviders.join(", ")})` : "kept"}.`,
+		`Mid-run checkpoints are ${config.midRun ? `on (outputs ≥ ${config.midRunMinAgeTurns} turns old, batches of ≥ ${formatChars(config.midRunBatchChars)} chars)` : "off"}; old exchanges are ${config.pruneExchanges ? `judged (all but the last ${config.keepRecentExchanges})` : "kept"}; tool-output images are ${config.imageKeepTurns > 0 ? `removed after ${config.imageKeepTurns} turns` : "kept"}; long tool-call arguments are ${config.argKeepTurns > 0 ? `shortened after ${config.argKeepTurns} turns${config.argStubExcludeModels.length ? ` (not for ${config.argStubExcludeModels.join(", ")})` : ""}` : "kept"}.`,
 	];
 	const last = stats.last;
 	if (last) {

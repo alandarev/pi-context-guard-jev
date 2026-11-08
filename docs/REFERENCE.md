@@ -99,7 +99,7 @@ fall back to the default.
 | `imageKeepTurns` | `3` | Remove images from tool results once this many assistant messages have followed them (`recall` shows them again); images in user messages are kept; `0` turns this off |
 | `argKeepTurns` | `4` | Shorten long arguments of tool calls once this many assistant messages have followed the call: the head and tail of each long string stay, with one `[context-guard: … omitted here afterwards …]` line between them (`recall` with the assistant entry id shows the call); `0` turns this off |
 | `argMinChars` | `2000` | Shorten a string argument only if that removes at least this many characters (200–10,000,000) |
-| `argStubProviders` | `["openai-codex"]` | Model providers whose sessions get shortened arguments. Off for `anthropic` by default: in live probes Claude Haiku took the marker line for something it had written, re-checked its files and reported a problem to the user ([DESIGN.md](DESIGN.md#items-what-one-pass-judges)) |
+| `argStubExcludeModels` | `["*haiku*"]` | Models whose sessions never get shortened arguments: glob patterns (`*` = any text, case-insensitive) matched against the model id and `provider/id`. Haiku by default: in live probes Claude Haiku took the marker line for something it had written, re-checked its files and reported a problem to the user; Opus 5.5, Sonnet 4.6 and GPT did not ([DESIGN.md](DESIGN.md#items-what-one-pass-judges)) |
 
 Example:
 
@@ -155,7 +155,7 @@ sessions. See OpenRouter's data policy:
   images and arguments)
 - tool-call arguments younger than `argKeepTurns` (4) turns or shorter than `argMinChars`, calls that
   failed or have no result, `recall` calls, assistant messages another extension changed, and arguments in
-  sessions whose provider is not in `argStubProviders` (Anthropic by default); text and thinking of
+  sessions whose model matches `argStubExcludeModels` (Haiku by default); text and thinking of
   assistant messages are never changed
 
 ## Limitations

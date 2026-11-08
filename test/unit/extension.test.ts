@@ -1042,14 +1042,16 @@ const writeRun = (turns: number, done: boolean, prefix = "w") => {
 };
 const codexModel = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-5.6-luna" };
 
-test("agent_before_settle: long arguments of old calls are shortened without Jev (OpenAI Codex only); recall shows the call", async () => {
+test("agent_before_settle: long arguments of old calls are shortened without Jev (not for Haiku); recall shows the call", async () => {
 	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	const session = fakeSession(writeRun(6, true) as never);
 	const { ctx, calls } = sessionCtx(session);
 	ctx.modelRegistry.findOfType = (() => undefined) as never;
 	await handler("session_start")({ type: "session_start" }, ctx);
-	// Claude: argStubProviders leaves it out.
-	assert.equal(await settle(session, { ...ctx, model: anthropicModel }), undefined);
+	// Claude Haiku: argStubExcludeModels leaves it out.
+	assert.equal(await settle(session, { ...ctx, model: { ...anthropicModel, id: "claude-haiku-5-5" } }), undefined);
+	// Claude Opus gets it, like every other model.
+	assert.deepEqual(editTargets((await settle(session, { ...ctx, model: { ...anthropicModel, id: "claude-opus-5-5" } })) as never), ["wa0", "wa1", "wa2"]);
 	Object.assign(ctx, { model: codexModel });
 	const result = (await settle(session, ctx)) as { entries: Json[] };
 	assert.equal(calls.length, 0);
@@ -1108,7 +1110,7 @@ test("turn_end: old long arguments fill a checkpoint batch on their own, under t
 test("turn_end: long arguments from before the last user message are the first tier dropped", async () => {
 	// A provider that rewrites from the earliest edit: an earlier run's call moves the rewrite back over
 	// its ~240k chars of outputs, which its ~3k-char saving does not pay for; the current run's calls do.
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pruneExchanges: false, argStubProviders: ["other"] }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pruneExchanges: false }));
 	const earlier = [...writeRun(1, false, "p")];
 	for (let t = 0; t < 30; t++) {
 		earlier.push(assistant("", [{ id: `pb${t}`, name: "bash", arguments: { command: `cat log${t}` } }], `pba${t}`));
@@ -1124,7 +1126,7 @@ test("turn_end: long arguments from before the last user message are the first t
 	assert.equal(targets.length, 26);
 	assert.ok(targets.every((id) => id.startsWith("wa")));
 	// Without the break-even rule the earlier call comes along.
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pruneExchanges: false, argStubProviders: ["other"], midRunBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pruneExchanges: false, midRunBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	assert.equal(editTargets(await handler("turn_end")(turnEndOf(session), ctx))[0], "pa0");
 	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));

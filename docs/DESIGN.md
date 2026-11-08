@@ -286,11 +286,11 @@ collected again next time. Mid-run, images count towards the batch; the tiers ar
 exchanges; without exchanges and images from before the last user message.
 
 **Old tool-call arguments** (`args.ts → collectArgs`, `argKeepTurns`, 4; `argMinChars`, 2,000;
-`argStubProviders`, `["openai-codex"]`). Measured on 3 weeks of real sessions, string arguments of at least
+`argStubExcludeModels`, `["*haiku*"]`). Measured on 3 weeks of real sessions, string arguments of at least
 2,000 characters in calls at least 4 assistant turns old were ~8% of all context (`write` ≈ 48%, long `bash`
 commands and heredocs ≈ 37%, then codemode, `edit`, subagent prompts). Every assistant message in the
 projection, earlier runs included, that at least `argKeepTurns` assistant messages follow, when the session's
-model provider is in `argStubProviders`. A call is touched only if its tool result is in the projection and
+model does not match `argStubExcludeModels`. A call is touched only if its tool result is in the projection and
 not an error (a failed call is often retried with a corrected value, which the model must still see), and
 never for `recall`. Every string leaf of its arguments (also inside objects and arrays, such as `edit`'s
 `edits[].oldText`/`newText`) that would shrink by at least `argMinChars` keeps its first 12 and last 6 lines
@@ -313,7 +313,7 @@ earlier ones shortened at each turn boundary, mid-run within the tool loop or on
 both providers accept the edited history, including assistant messages with signed thinking blocks, mid-run
 and across runs (0 provider errors in 12 runs: `anthropic/claude-haiku-5-5` thinking high with
 `pi-claude-auth`, `anthropic/claude-sonnet-4-6`, `openai-codex/gpt-5.6-luna`). The model's reaction decides
-the provider list:
+the exclusion list:
 - A whole-value stub (`[context-guard] Omitted 2.2k chars of this argument…`) made Haiku believe it had
   written the stub into the file: with every earlier call stubbed it rewrote `a.txt` and `b.txt` in a loop
   (stopped after 15 minutes); at 4 turns it read the file back to check. Hence head and tail stay.
@@ -322,10 +322,13 @@ the provider list:
   line", 2 runs spent an extra `grep`/`tail` on the files, and every final answer flagged a "discrepancy"
   or "problem with my earlier writes". Sonnet 4.6 (1 mid-run run) and Codex luna (mid-run and earlier-run)
   went on without remarks or extra calls.
+- Claude Opus 5.5 (thinking high, 4 runs: 2 mid-run at 4 turns, 2 earlier-run): no extra calls, no remarks
+  in any answer. Its thinking noticed the shortening twice and read it correctly ("the context guard dropped
+  some lines from my file writes, but wc showed the file is intact").
 
-So `argStubProviders` defaults to OpenAI Codex only. Adding `anthropic` risks the confusion above (extra
-calls, wrong reports to the user, at worst repeated writes); larger Claude models may cope, as Sonnet did
-in one run, but that is not verified.
+So `argStubExcludeModels` defaults to `["*haiku*"]`: every other model gets shortened arguments. The probes
+are short (2–4 requests after the edit); a Haiku-like reaction in another model would show as extra
+verification calls or wrong "the write failed" reports, and that model belongs on the list.
 
 **Batching.** Whole items are grouped into requests of at most `maxSegmentChars` characters of item text and
 `maxChunksPerSegment` (40) items, under the same `timeoutMs` budget; the three kinds run at the same time,
