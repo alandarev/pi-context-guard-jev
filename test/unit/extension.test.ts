@@ -35,7 +35,7 @@ interface LoadedExtension {
 let extension: LoadedExtension;
 
 before(async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	const { loadExtensions } = (await import(pathToFileURL(loaderPath).href)) as {
 		loadExtensions: (paths: string[], cwd: string) => Promise<{ extensions: LoadedExtension[]; errors: { path: string; error: string }[] }>;
 	};
@@ -214,7 +214,7 @@ test("/guard off|on persists to the temp agent dir and pauses distillation", asy
 	const guard = extension.commands.get("guard")!;
 
 	await guard.handler("off", ctx);
-	assert.deepEqual(JSON.parse(readFileSync(configFile, "utf8")), { timeoutMs: 5_000, enabled: false });
+	assert.deepEqual(JSON.parse(readFileSync(configFile, "utf8")), { timeoutMs: 5_000, runEndBreakEven: false, enabled: false });
 	assert.match(notes.at(-1) ?? "", /^context-guard is off/);
 	assert.equal(await handler("agent_before_settle")(settleEvent(), ctx), undefined);
 	assert.equal(calls.length, 0);
@@ -403,7 +403,7 @@ const countMarks = (payload: Json) => JSON.stringify(payload).split('"cache_cont
 const providerRequest = (payload: Json, ctx: Json) => handler("before_provider_request")({ type: "before_provider_request", payload }, { ...ctx, model: { api: "anthropic-messages" } });
 
 test("turn_end: batches, the persisted memo, the read point and run end", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, midRunBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, midRunBreakEven: false }));
 	const session = fakeSession(longRunEntries(7));
 	// out1 is "needed whole" (kept); everything else keeps only chunk_1.
 	const answers = (request: ClassifierRequest) => {
@@ -483,11 +483,11 @@ test("turn_end: batches, the persisted memo, the read point and run end", async 
 	for (const m of next.messages) for (const b of Array.isArray(m.content) ? m.content : []) if (b.type === "tool_result") delete b.cache_control;
 	providerRequest(next, ctx);
 	assert.deepEqual(marks(next), ["messages[2].content[1]", "c2", "messages[35].content[0]"]);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("turn_end: drafts that another handler drops or Pi rejects are judged again", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, midRunBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, midRunBreakEven: false }));
 	const session = fakeSession(longRunEntries(9));
 	const { ctx, calls } = sessionCtx(session);
 	await handler("session_start")({ type: "session_start" }, ctx);
@@ -504,11 +504,11 @@ test("turn_end: drafts that another handler drops or Pi rejects are judged again
 	const payload = claudeAuthPayload(9);
 	providerRequest(payload, ctx);
 	assert.deepEqual(marks(payload), ["messages[2].content[1]", "c8"]);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("turn_end: unanswered outputs (error) are asked again at the next checkpoint", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, midRunBreakEven: false, midRunBatchChars: 1 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, midRunBreakEven: false, midRunBatchChars: 1 }));
 	const session = fakeSession(longRunEntries(9));
 	let fail = true;
 	const answers = (request: ClassifierRequest): ClassifierResponse =>
@@ -533,11 +533,11 @@ test("turn_end: unanswered outputs (error) are asked again at the next checkpoin
 		second.entries.filter((e) => e.type === "context_edit").map((e) => e.targetId),
 		["r2"],
 	);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("turn_end: the memo follows the branch (/tree back before a checkpoint)", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, midRunBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, midRunBreakEven: false }));
 	const session = fakeSession(longRunEntries(9));
 	const { ctx, calls } = sessionCtx(session);
 	await handler("session_start")({ type: "session_start" }, ctx);
@@ -550,7 +550,7 @@ test("turn_end: the memo follows the branch (/tree back before a checkpoint)", a
 	const result = (await handler("turn_end")(turnEndOf(session), ctx)) as { entries: Json[] };
 	assert.equal(result.entries.filter((e) => e.type === "context_edit").length, 4);
 	assert.equal(calls.length, 8);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("before_provider_request: an edit of the run's first output falls back to the question pin", () => {
@@ -569,14 +569,14 @@ test("before_provider_request: an edit of the run's first output falls back to t
 test("turn_end: midRun off and other outcomes do nothing", async () => {
 	const session = fakeSession(longRunEntries(9));
 	const { ctx, calls } = sessionCtx(session);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, midRunBreakEven: false, midRun: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, midRunBreakEven: false, midRun: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	assert.equal(await handler("turn_end")(turnEndOf(session), ctx), undefined);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, midRunBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, midRunBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	assert.equal(await handler("turn_end")({ ...turnEndOf(session), outcome: "aborted" }, ctx), undefined);
 	assert.equal(calls.length, 0);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 });
 
@@ -643,12 +643,12 @@ test("before_provider_request: an anchor dropped for the budget, or pinning off,
 	assert.equal(marks(next).includes("c3"), false);
 
 	// History made with pinning off leaves no log entries either.
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, pinAnthropicCache: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pinAnthropicCache: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	const off = claudeAuthPayload(6);
 	providerRequest(off, ctx);
 	assert.deepEqual(marks(off), ["c5"]);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	session.commit([{ type: "context_edit", targetId: "r1", replacement: { content: [{ type: "text", text: "[context-guard] …" }] } }]);
 	const on = claudeAuthPayload(6);
@@ -738,7 +738,7 @@ function multiTopic() {
 }
 
 test("agent_before_settle: old exchanges and small outputs are judged with the final answer", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, exchangeBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, exchangeBreakEven: false }));
 	const session = fakeSession(multiTopic() as never);
 	const { ctx, calls } = sessionCtx(session, itemAnswers((k, request) => (request.state.exchanges ? 0.05 : 0.1)));
 	await handler("session_start")({ type: "session_start" }, ctx);
@@ -786,11 +786,11 @@ test("agent_before_settle: old exchanges and small outputs are judged with the f
 	const listed = next.entries.length >= 0 && result.entries.at(-1)!.data.results.find((r: Json) => r.kind === "exchange").omitted;
 	assert.deepEqual(listed, ["a1", "r1", "a1b"]);
 	// The stats count the omitted exchange.
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("agent_before_settle: pruneExchanges off and smallResultMinChars 0 leave them alone", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, pruneExchanges: false, smallResultMinChars: 0 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, pruneExchanges: false, smallResultMinChars: 0 }));
 	const session = fakeSession(multiTopic() as never);
 	const { ctx, calls } = sessionCtx(session, itemAnswers(() => 0.01));
 	await handler("session_start")({ type: "session_start" }, ctx);
@@ -800,7 +800,7 @@ test("agent_before_settle: pruneExchanges off and smallResultMinChars 0 leave th
 	);
 	assert.equal(result, undefined);
 	assert.equal(calls.length, 0);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 });
 
@@ -810,13 +810,13 @@ test("turn_end: old exchanges join the batch; the break-even rule drops them whe
 	const session = fakeSession([...old, ...longRunEntries(9).slice(2)] as never);
 	const { ctx, calls } = sessionCtx(session, itemAnswers(() => 0.05));
 	// Break-even off: the batch has the 3 eligible exchanges (2 recent kept) and the large outputs.
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, midRunBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, midRunBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	const forced = (await handler("turn_end")(turnEndOf(session), ctx)) as { entries: Json[] };
 	const kinds = (entries: Json[]) => entries.at(-1)!.data.results.map((r: Json) => `${r.kind}:${r.entryId}`);
 	assert.deepEqual(kinds(forced.entries), ["large:r1", "large:r2", "large:r3", "large:r4", "exchange:ou0", "exchange:ou1", "exchange:ou2"]);
 	// Break-even on: the exchanges move the rewrite to the start of the context and are dropped from the batch.
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	const before = calls.length;
 	const result = await handler("turn_end")(turnEndOf(session), ctx);
@@ -843,7 +843,7 @@ const settle = async (session: ReturnType<typeof fakeSession>, ctx: Json) =>
 const anthropicModel = { api: "anthropic-messages", provider: "anthropic", id: "claude-sonnet-5-5" };
 
 test("run-end break-even: a small omission is deferred, then the accumulated batch pays off", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, smallResultMinChars: 0 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, smallResultMinChars: 0 }));
 	// Exchange ou0 saves ~5k chars: below exchangeMinSavingChars (8,000), so it waits.
 	const session = fakeSession([...oldExchange(0, 12), ...recent(), user("current task", "cu"), assistant("done", [], "ca")] as never);
 	const { ctx } = sessionCtx(session, itemAnswers(() => 0.05));
@@ -857,11 +857,11 @@ test("run-end break-even: a small omission is deferred, then the accumulated bat
 	session.append([...oldExchange(1, 12), user("next task", "nu"), assistant("done", [], "na")] as never);
 	const second = await settle(session, ctx);
 	assert.deepEqual(exchangeResults(second), ["ou0:removed:unrelated", "rcu1:removed:unrelated", "rcu2:removed:unrelated"]);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("run-end break-even: a big early exchange in a short session does not pay off", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, smallResultMinChars: 0 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, smallResultMinChars: 0 }));
 	// One old exchange of ~20k chars, but only a handful of requests in the session.
 	const big = [user("old big task", "bu"), assistant("", [{ id: "bc", name: "bash", arguments: { command: "cat big" } }], "ba"), toolResult("bc", "bash", "z".repeat(20_000), "br"), assistant(`done\n${lines(10, "b")}`, [], "bb")];
 	const session = fakeSession([...big, ...recent(), user("current", "cu"), assistant("done", [], "ca")] as never);
@@ -870,14 +870,40 @@ test("run-end break-even: a big early exchange in a short session does not pay o
 	await handler("session_start")({ type: "session_start" }, ctx);
 	assert.deepEqual(exchangeResults(await settle(session, ctx)), ["bu:kept:deferred"]);
 	// exchangeBreakEven false: always omitted.
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, smallResultMinChars: 0, exchangeBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, smallResultMinChars: 0, exchangeBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	assert.deepEqual(exchangeResults(await settle(session, ctx)), ["bu:removed:unrelated"]);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
+});
+
+test("run-end break-even: a run end's own edits must pay off (OpenAI Codex: short session kept, long session distilled)", async () => {
 	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	const codex = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-6-luna" };
+	const { ctx } = fakeCtx();
+	Object.assign(ctx, { model: codex });
+	await handler("session_start")({ type: "session_start" }, ctx);
+	// Three requests so far: rewriting the whole cache for this saving does not pay off.
+	const short = (await handler("agent_before_settle")(settleEvent(), ctx)) as { entries: Record<string, any>[] };
+	const shortRecord = short.entries.at(-1)!;
+	assert.equal(short.entries.filter((e) => e.type === "context_edit").length, 0);
+	assert.equal(shortRecord.data.savedChars, 0);
+	assert.deepEqual(
+		shortRecord.data.results.filter((r: any) => r.kind === "large").map((r: any) => `${r.entryId}:${r.outcome}:${r.reason}`),
+		["r1:kept:no-payoff", "r2:kept:no-payoff"],
+	);
+	// The same run after 60 earlier requests: the saving is carried by enough later requests.
+	const history = Array.from({ length: 60 }, (_, i) => [user(`q${i}`, `uh${i}`), assistant(`a${i}`, [], `ah${i}`)]).flat();
+	const long = { ...settleEvent(), context: { contextEntries: [...history, ...contextEntries()] } };
+	const result = (await handler("agent_before_settle")(long, ctx)) as { entries: Record<string, any>[] };
+	assert.deepEqual(
+		result.entries.filter((e) => e.type === "context_edit").map((e) => e.targetId),
+		["r1", "r2"],
+	);
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("run-end break-even: on OpenAI Codex exchanges ride along when the pass edits anything else", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	const codex = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-6-luna" };
 	// multiTopic's current run has a small output (r4) that is dropped: the cache misses anyway.
 	const session = fakeSession(multiTopic() as never);
@@ -906,7 +932,7 @@ const screenshotRun = (turns: number, done: boolean, prefix = "s") => {
 const editTargets = (result: unknown) => ((result as { entries: Json[] } | undefined)?.entries ?? []).filter((e) => e.type === "context_edit").map((e) => e.targetId);
 
 test("agent_before_settle: old images are removed without Jev (even when it is unavailable); recall shows them again", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	const session = fakeSession(screenshotRun(5, true) as never);
 	const { ctx, calls } = sessionCtx(session);
 	ctx.modelRegistry.findOfType = (() => undefined) as never;
@@ -948,7 +974,7 @@ test("agent_before_settle: old images are removed without Jev (even when it is u
 });
 
 test("turn_end: old images fill a checkpoint batch on their own, under the break-even rule", async () => {
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	// 12 turns: 9 images (~72k chars) are old enough, but the rewrite does not pay off yet.
 	const short = fakeSession(screenshotRun(12, false) as never);
 	const first = sessionCtx(short);
@@ -962,10 +988,10 @@ test("turn_end: old images fill a checkpoint batch on their own, under the break
 	assert.equal(editTargets(result).length, 27);
 	assert.equal(result.entries.at(-1)!.data.phase, "mid-run");
 	// Images off: nothing.
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, imageKeepTurns: 0 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, imageKeepTurns: 0 }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	assert.equal(await handler("turn_end")(turnEndOf(long), ctx), undefined);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("agent_before_settle: images of an earlier run go through the break-even gate", async () => {
@@ -973,14 +999,14 @@ test("agent_before_settle: images of an earlier run go through the break-even ga
 	const current = [user("Fix it", "cu"), assistant("", [{ id: "cc", name: "bash", arguments: { command: "make" } }], "ca"), toolResult("cc", "bash", "ok", "cr"), assistant("Fixed.", [], "cd")];
 	const session = fakeSession([...earlier, ...current] as never);
 	const { ctx } = sessionCtx(session);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	// ~8k chars saved over 4 requests against an ~8k-char rewrite: deferred.
 	assert.equal(await settle(session, ctx), undefined);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, exchangeBreakEven: false }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false, exchangeBreakEven: false }));
 	await handler("session_start")({ type: "session_start" }, ctx);
 	assert.deepEqual(editTargets(await settle(session, ctx)), ["pr"]);
-	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000 }));
+	writeFileSync(configFile, JSON.stringify({ timeoutMs: 5_000, runEndBreakEven: false }));
 });
 
 test("recall of an omitted exchange attaches user images and names tool-result images", async () => {

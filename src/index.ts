@@ -40,7 +40,7 @@ import { omittedIdsFor, originalContent, RECALL_MAX_IMAGES, recallText } from ".
 import { clipError, failureFromRecord, failureStatus, failureWarning, type JevFailure, nextJevFailure } from "./health.ts";
 import { formatChars, MARKER, RECALL_TOOL } from "./render.ts";
 import { collectExchanges, collectSmall, type ExchangeItem, type SmallItem, type WorkContext } from "./items.ts";
-import { addImages, deferExchanges, dropImages, emptyOutcome, exchangeOmissions, type ProcessOptions, type ProcessOutcome, processItems } from "./process.ts";
+import { addImages, deferExchanges, dropImages, dropOutputs, emptyOutcome, outputEdits, exchangeOmissions, type ProcessOptions, type ProcessOutcome, processItems } from "./process.ts";
 import { collectRun, findRunStart, lastUserIndex, type RunInfo } from "./run.ts";
 import {
 	CUSTOM_TYPE,
@@ -282,15 +282,17 @@ export default function contextGuard(pi: ExtensionAPI) {
 	 * zero, they must save at least `exchangeMinSavingChars` and pay off over as many later requests as
 	 * the session has had so far.
 	 */
-	const exchangesPayOff = (ctx: ExtensionContext, entries: ProjectedEntryLike[], outcome: ProcessOutcome): boolean => {
+	const exchangesPayOff = (ctx: ExtensionContext, entries: ProjectedEntryLike[], outcome: ProcessOutcome, others: ReadonlySet<string>): boolean => {
 		const { savedChars, ids } = exchangeOmissions(outcome);
-		return earlyEditsPayOff(ctx, entries, outcome, ids, savedChars, config.exchangeMinSavingChars);
+		return earlyEditsPayOff(ctx, entries, others, ids, savedChars, config.exchangeMinSavingChars);
 	};
 
-	/** The same marginal-cost gate for edits `ids` that save `savedChars` (exchanges, images of earlier runs). */
-	const earlyEditsPayOff = (ctx: ExtensionContext, entries: ProjectedEntryLike[], outcome: ProcessOutcome, ids: ReadonlySet<string>, savedChars: number, minSavingChars: number): boolean => {
+	/**
+	 * The same marginal-cost gate for edits `ids` that save `savedChars`, on top of the already accepted
+	 * edits `others` (their rewrite is paid anyway).
+	 */
+	const earlyEditsPayOff = (ctx: ExtensionContext, entries: ProjectedEntryLike[], others: ReadonlySet<string>, ids: ReadonlySet<string>, savedChars: number, minSavingChars: number): boolean => {
 		if (ids.size === 0) return true;
-		const others = new Set(outcome.edits.map((e) => e.targetId).filter((id) => !ids.has(id)));
 		const rewriteWith = rewriteCharsFor(ctx, entries, new Set([...others, ...ids]));
 		const rewriteWithout = others.size > 0 ? rewriteCharsFor(ctx, entries, others) : 0;
 		const marginal = rewriteWith - rewriteWithout;
@@ -379,10 +381,19 @@ export default function contextGuard(pi: ExtensionAPI) {
 
 		const outcome = await processWithStatus(ctx, run, small, exchanges, images, work, config);
 		if (!outcome || (outcome.requests === 0 && outcome.edits.length === 0)) return;
-		if (config.exchangeBreakEven && !exchangesPayOff(ctx, entries, outcome)) deferExchanges(outcome);
-		// Images of earlier runs (before this run's prompt) move the cache rewrite back like exchanges do.
+		// Break-even gates in order, each on top of the edits accepted before it: this run's own edits
+		// (outputs and its images), then old exchanges, then images of earlier runs (before this run's
+		// prompt), which move the cache rewrite back like exchanges do. On OpenAI Codex any edit rewrites
+		// the whole cache, so a run end that only distils a little would cost more than it saves.
 		const early = images.filter((i) => i.index < runStart);
-		if (config.exchangeBreakEven && !earlyEditsPayOff(ctx, entries, outcome, new Set(early.map((i) => i.entryId)), imageSaving(early), 0)) {
+		const own = outputEdits(outcome, new Set(images.filter((i) => i.index > runStart).map((i) => i.entryId)));
+		if (config.runEndBreakEven && !earlyEditsPayOff(ctx, entries, new Set(), own.ids, own.savedChars, 0)) {
+			dropOutputs(outcome, own.ids);
+			own.ids.clear();
+		}
+		if (config.exchangeBreakEven && !exchangesPayOff(ctx, entries, outcome, own.ids)) deferExchanges(outcome);
+		const accepted = new Set([...own.ids, ...exchangeOmissions(outcome).ids]);
+		if (config.exchangeBreakEven && !earlyEditsPayOff(ctx, entries, accepted, new Set(early.map((i) => i.entryId)), imageSaving(early), 0)) {
 			dropImages(outcome, new Set(early.map((i) => i.entryId)));
 		}
 		if (outcome.requests === 0 && outcome.edits.length === 0) return;

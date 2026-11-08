@@ -216,6 +216,37 @@ export function dropImages(outcome: ProcessOutcome, ids: ReadonlySet<string>): v
 	});
 }
 
+/**
+ * Take the edits of `ids` (distilled or removed outputs, image removals) back out of `outcome`: the
+ * run-end break-even gate found that their cache rewrite does not pay off. Their records say `kept` with
+ * reason `no-payoff`; image records are dropped (the image stays and is collected again next time).
+ */
+export function dropOutputs(outcome: ProcessOutcome, ids: ReadonlySet<string>): void {
+	if (ids.size === 0) return;
+	outcome.edits = outcome.edits.filter((e) => !ids.has(e.targetId));
+	outcome.records = outcome.records.filter((r) => {
+		if (!ids.has(r.entryId) || r.outcome === "kept" || r.kind === "exchange") return true;
+		outcome.savedChars -= r.beforeChars - r.afterChars;
+		if (r.kind === "image") return false;
+		r.outcome = "kept";
+		r.reason = "no-payoff";
+		r.afterChars = r.beforeChars;
+		return true;
+	});
+}
+
+/** Entry ids and net characters of the outcome's output edits (large, small, and images in `imageIds`). */
+export function outputEdits(outcome: ProcessOutcome, imageIds: ReadonlySet<string>): { savedChars: number; ids: Set<string> } {
+	const ids = new Set<string>();
+	let savedChars = 0;
+	for (const r of outcome.records) {
+		if (r.outcome === "kept" || r.kind === "exchange" || (r.kind === "image" && !imageIds.has(r.entryId))) continue;
+		ids.add(r.entryId);
+		savedChars += r.beforeChars - r.afterChars;
+	}
+	return { savedChars, ids };
+}
+
 /** Net characters the outcome's exchange omissions remove, and the entry ids they edit. */
 export function exchangeOmissions(outcome: ProcessOutcome): { savedChars: number; ids: Set<string> } {
 	const ids = new Set<string>();

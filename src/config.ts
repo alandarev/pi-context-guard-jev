@@ -78,6 +78,12 @@ export interface GuardConfig {
 	 * exchanges stay eligible and accumulate. `false` always omits unrelated exchanges.
 	 */
 	exchangeBreakEven: boolean;
+	/**
+	 * Gate the run end's own edits (this run's distilled outputs and image removals) by the break-even
+	 * rule: their cache rewrite must pay off over as many later requests as the session has had so far.
+	 * Failing edits are dropped; the outputs stay as they are. `false` always applies them.
+	 */
+	runEndBreakEven: boolean;
 	/** A pass omits exchanges only if they save at least this many characters together (when that costs a cache rewrite). */
 	exchangeMinSavingChars: number;
 	/**
@@ -118,6 +124,7 @@ export const DEFAULT_CONFIG: GuardConfig = {
 	keepRecentExchanges: 2,
 	exchangeOmitThreshold: 0.2,
 	exchangeBreakEven: true,
+	runEndBreakEven: true,
 	exchangeMinSavingChars: 8_000,
 	imageKeepTurns: 3,
 };

@@ -94,6 +94,7 @@ fall back to the default.
 | `keepRecentExchanges` | `2` | The last this many exchanges before the current prompt are never omitted |
 | `exchangeOmitThreshold` | `0.2` | Omit an exchange only if P(still relevant) is below this (probe in [JEV.md](JEV.md)) |
 | `exchangeBreakEven` | `true` | At run end, omit unrelated exchanges only when the cache rewrite they cause pays off; deferred ones are judged again at later run ends and omitted once their total pays off. `false` always omits them |
+| `runEndBreakEven` | `true` | At run end, apply the run's own edits (distilled outputs, its image removals) only when their cache rewrite pays off over as many later requests as the session has had so far; otherwise the outputs stay as they are (reason `no-payoff`). `false` always applies them |
 | `exchangeMinSavingChars` | `8000` | A run end omits exchanges only if they save at least this many characters together (when they cost a cache rewrite) |
 | `imageKeepTurns` | `3` | Remove images from tool results once this many assistant messages have followed them (`recall` shows them again); images in user messages are kept; `0` turns this off |
 

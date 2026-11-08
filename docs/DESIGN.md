@@ -249,6 +249,14 @@ their results are omitted together. The resulting shapes (a stub user message ri
 message; spans without assistant and tool-result messages) are accepted by Anthropic (with
 `pi-claude-auth`) and OpenAI Codex, checked live with `test/e2e/omit-probe.ts` and the `topics` scenario.
 
+**Run-end break-even for the run's own edits** (`runEndBreakEven`, on). Checked first: the run's distilled
+or removed outputs and its image removals must pass `paysOff` with their whole rewrite (`rewriteCharsFor`)
+and as many later requests as the session has had so far. Otherwise they are dropped and their results say
+`kept` / `no-payoff`. Measured on 3 weeks of real sessions (`test/analysis/gate.py`), ungated run ends
+cost more in cache rewrites than they saved on OpenAI Codex (any edit rewrites the whole cache); with the
+gate (factor 13) the run-end net rose from −$74 to +$95 (Codex) and from +$154 to +$784 (Anthropic).
+Exchanges and old images are then gated on top of the accepted output edits.
+
 **Run-end break-even for exchanges** (`exchangeBreakEven`, on). After the pass is judged, its exchange
 omissions are checked: their marginal cache cost is the rewrite with them minus the rewrite the pass's
 other edits cause anyway (`rewriteCharsFor`, with the trusted read point and floor rules of
